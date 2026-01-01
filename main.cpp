@@ -449,7 +449,6 @@ void HandleRoll(HWND hWnd) {
     out.flush();
 
     std::wstring msg = L"Roll(s) saved to:\n" + fullPathW;
-    MessageBoxW(hWnd, msg.c_str(), L"Saved", MB_OK | MB_ICONINFORMATION);
 }
 
 void HandleBrowse(HWND hWnd) {
