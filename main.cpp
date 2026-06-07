@@ -215,7 +215,7 @@ void SetupControls(HWND hWnd) {
         20, 40, 80, 20,
         hWnd, nullptr, nullptr, nullptr);
 
-    CreateWindowW(L"EDIT", L"",
+    CreateWindowW(L"EDIT", L"roll",
         WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
         110, 40, 150, 20,
         hWnd, (HMENU)IDC_NAME_EDIT, nullptr, nullptr);
