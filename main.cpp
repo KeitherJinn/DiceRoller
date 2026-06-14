@@ -364,7 +364,7 @@ void HandleRoll(HWND hWnd) {
     }
 
     if (!hasContent) {
-        out << "Name,DiceNotation,Mode,NumDice,Sides,BaseRoll,AltRoll,Modifier,FinalResult,Timestamp\n";
+        out << "Name,DiceNotation,Mode,NumDice,Sides,BaseRoll,AltRoll,Modifier,FinalResult\n";
     }
 
     std::string modeStr;
