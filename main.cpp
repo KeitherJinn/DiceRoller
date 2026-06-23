@@ -382,7 +382,7 @@ void SetupControls(HWND hWnd) {
     );
 
     // Default: checked
-    SendMessageW(hShowTimestamp, BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(hShowTimestamp, BM_SETCHECK, BST_UNCHECKED, 0);
 
     // Roll button
     CreateWindowW(
