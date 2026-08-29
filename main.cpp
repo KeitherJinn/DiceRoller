@@ -620,8 +620,11 @@ void HandleRoll(HWND hWnd) {
                 << L" (" << (mode == MODE_ADV ? L"advantage" : L"disadvantage") << L")";
         }
 
-        line << L" (modifier " << (modifier >= 0 ? L"+" : L"") << modifier
-            << L") -> Final: " << finalResult;
+		if (modifier != 0) {
+            line << L" (modifier " << (modifier >= 0 ? L"+" : L"") << modifier;
+		}
+
+        line << L") -> Final: " << finalResult;
 
         if (showTimestamp) {
             line << L"  @ " << tsW;
