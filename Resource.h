@@ -1,30 +1,36 @@
-﻿//{{NO_DEPENDENCIES}}
-// Microsoft Visual C++ 生成的包含文件。
-// 使用者 DiceRoller.rc
-
-#define IDS_APP_TITLE			103
-
-#define IDR_MAINFRAME			128
-#define IDD_DICEROLLER_DIALOG	102
-#define IDD_ABOUTBOX			103
-#define IDM_ABOUT				104
-#define IDM_EXIT				105
-#define IDI_DICEROLLER			107
-#define IDI_SMALL				108
-#define IDC_DICEROLLER			109
-#define IDC_MYICON				2
-#ifndef IDC_STATIC
-#define IDC_STATIC				-1
-#endif
-// 新对象的下一组默认值
-//
-#ifdef APSTUDIO_INVOKED
-#ifndef APSTUDIO_READONLY_SYMBOLS
-
-#define _APS_NO_MFC					130
-#define _APS_NEXT_RESOURCE_VALUE	129
-#define _APS_NEXT_COMMAND_VALUE		32771
-#define _APS_NEXT_CONTROL_VALUE		1000
-#define _APS_NEXT_SYMED_VALUE		110
-#endif
-#endif
+#pragma once
+#define IDS_APP_TITLE 103
+#define IDD_ABOUTBOX 103
+#define IDM_ABOUT 104
+#define IDM_EXIT 105
+#define IDI_DICEROLLER 107
+#define IDI_SMALL 108
+#define IDC_DICEROLLER 109
+#define IDC_STATIC -1
+#define IDC_FILE_EDIT 1000
+#define IDC_NAME_EDIT 1001
+#define IDC_DICE_EDIT 1002
+#define IDC_TIMES_EDIT 1003
+#define IDC_RAD_NORMAL 1004
+#define IDC_RAD_ADV 1005
+#define IDC_RAD_DISADV 1006
+#define IDC_TIMESTAMP 1007
+#define IDC_AUTOSAVE 1008
+#define IDC_ROLL 1010
+#define IDC_CANCEL 1011
+#define IDC_SAVE 1012
+#define IDC_DISCARD 1013
+#define IDC_OPEN 1014
+#define IDC_COPY 1015
+#define IDC_CLEAR 1016
+#define IDC_BROWSE 1017
+#define IDC_OUTPUT 1020
+#define IDC_PROGRESS 1021
+#define IDC_STATUS 1022
+#define IDC_RETENTION 1023
+#define IDC_FILE_LABEL 1030
+#define IDC_NAME_LABEL 1031
+#define IDC_DICE_LABEL 1032
+#define IDC_TIMES_LABEL 1033
+#define IDC_MODE_GROUP 1034
+#define IDC_RULES 1035

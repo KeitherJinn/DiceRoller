@@ -122,7 +122,22 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NOMINMAX;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Manifest>
+      <AdditionalManifestFiles>DiceRoller.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+      <EnableDpiAwareness>false</EnableDpiAwareness>
+    </Manifest>
+  </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="DiceCore.h" />
+    <ClInclude Include="ResultStore.h" />
+    <ClInclude Include="RollJob.h" />
     <ClInclude Include="DiceRoller.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
@@ -130,6 +145,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="DiceCore.cpp" />
+    <ClCompile Include="ResultStore.cpp" />
+    <ClCompile Include="RollJob.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DiceRoller.rc" />
@@ -139,6 +157,7 @@
     <Image Include="small.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ItemGroup><None Include="DiceRoller.manifest" /></ItemGroup>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

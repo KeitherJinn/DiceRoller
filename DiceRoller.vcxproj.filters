@@ -18,6 +18,9 @@
     <ClInclude Include="framework.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="DiceCore.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="ResultStore.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="RollJob.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="targetver.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -32,6 +35,9 @@
     <ClCompile Include="main.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="DiceCore.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="ResultStore.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="RollJob.cpp"><Filter>源文件</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DiceRoller.rc">
@@ -46,4 +52,5 @@
       <Filter>资源文件</Filter>
     </Image>
   </ItemGroup>
+  <ItemGroup><None Include="DiceRoller.manifest"><Filter>资源文件</Filter></None></ItemGroup>
 </Project>
