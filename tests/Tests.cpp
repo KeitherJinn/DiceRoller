@@ -12,6 +12,10 @@
 namespace fs = std::filesystem;
 using namespace dice;
 void UiRegressionTests(const std::filesystem::path& base);
+void SettingsRegressionTests(const std::filesystem::path& base);
+void UiFeatureTests(const std::filesystem::path& base);
+void UiCloseTests(const std::filesystem::path& base);
+void UiViewportTests(const std::filesystem::path& base);
 namespace {
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -317,6 +321,22 @@ int main() {
     test("native UI layout, DPI, keyboard, background roll and retained-batch save", [] {
         TempDirectory temp;
         UiRegressionTests(temp.root);
+    });
+    test("settings Unicode, validation, corruption fallback and atomic save", [] {
+        TempDirectory temp;
+        SettingsRegressionTests(temp.root);
+    });
+    test("quick dice, presets, settings memory and browse recovery", [] {
+        TempDirectory temp;
+        UiFeatureTests(temp.root);
+    });
+    test("closing while confirmation pumps completed work", [] {
+        TempDirectory temp;
+        UiCloseTests(temp.root);
+    });
+    test("high DPI work area, scroll reachability and window placement", [] {
+        TempDirectory temp;
+        UiViewportTests(temp.root);
     });
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed ? 1 : 0;

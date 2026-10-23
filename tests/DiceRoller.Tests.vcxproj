@@ -37,9 +37,12 @@
   <ItemGroup>
     <ClCompile Include="Tests.cpp" />
     <ClCompile Include="UiTests.cpp" />
+    <ClCompile Include="SettingsTests.cpp" />
     <ClCompile Include="..\DiceCore.cpp" />
     <ClCompile Include="..\ResultStore.cpp" />
     <ClCompile Include="..\RollJob.cpp" />
+    <ClCompile Include="..\AppSettings.cpp" />
+    <ClCompile Include="..\WindowLayout.cpp" />
   </ItemGroup>
   <ItemGroup><ResourceCompile Include="..\DiceRoller.rc" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

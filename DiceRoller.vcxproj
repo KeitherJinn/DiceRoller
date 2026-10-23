@@ -138,6 +138,8 @@
     <ClInclude Include="DiceCore.h" />
     <ClInclude Include="ResultStore.h" />
     <ClInclude Include="RollJob.h" />
+    <ClInclude Include="AppSettings.h" />
+    <ClInclude Include="WindowLayout.h" />
     <ClInclude Include="DiceRoller.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
@@ -148,6 +150,8 @@
     <ClCompile Include="DiceCore.cpp" />
     <ClCompile Include="ResultStore.cpp" />
     <ClCompile Include="RollJob.cpp" />
+    <ClCompile Include="AppSettings.cpp" />
+    <ClCompile Include="WindowLayout.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DiceRoller.rc" />

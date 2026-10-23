@@ -14,7 +14,29 @@ It uses the Windows SDK and the MSVC v143 toolset; no third-party libraries or p
 - Results and modifiers use signed 64-bit integers. Inputs whose possible result exceeds that range are rejected.
 - Computation and saving run on a worker thread. The progress bar shows completed rolls; Cancel/Escape stops the operation.
   Only fully completed rolls are retained when calculation is cancelled. A partially generated group is discarded.
-- Show timestamp is initially unchecked and changes the display only. CSV always includes the local timestamp.
+- Timestamp on new results is initially unchecked and affects newly generated display entries only. CSV always includes the local timestamp.
+
+## Quick dice, presets and remembered settings
+
+- Quick dice buttons offer d4, d6, d8, d10, d12, d20 and d100. They set the expression to one die,
+  keep the current Times and Mode, and do not roll until you select **Roll**.
+- To create a custom preset, enter its name in the editable **Preset** box, configure Dice/Times/Mode,
+  and select **Save preset**. Up to 50 presets are supported, with names up to 64 UTF-16 code units.
+- Choose a saved name and select **Use** to restore its expression, times and mode; the roll name becomes
+  the preset name. Applying a preset affects the next roll, never a retained unsaved batch.
+- Saving an existing name (case-insensitive) asks before replacing it. **Delete preset** also asks for confirmation.
+- Preset changes are saved immediately. Normal exit remembers the latest valid roll inputs, CSV path,
+  automatic saving, timestamp option, normal window position/size and maximized state.
+  An unfinished invalid edit keeps the last valid roll configuration; an empty CSV path can be remembered.
+- Preferences and presets are stored in `%LOCALAPPDATA%\DiceRoller\settings.bin`, independently of CSV results.
+  The versioned configuration uses UTF-8 text fields with size/boundary checks. Missing settings use defaults;
+  unreadable, damaged or unsupported settings use defaults and show a warning in the status area.
+- Before replacing a configuration that failed to load, the app preserves its original bytes in a uniquely
+  named backup beside `settings.bin`. A failed backup prevents the replacement.
+- Configuration writes stage and flush a complete file before replacement. On save failure the old file is preserved;
+  preset edits are not committed in memory until persistence succeeds. If settings cannot be saved on exit,
+  you may stay in the app or close using the previously saved settings.
+- Settings do not contain generated results and do not provide unsaved-batch recovery after application exit.
 
 ## Saving and recovery
 
@@ -22,6 +44,8 @@ The default destination is `%LOCALAPPDATA%\DiceRoller\Results\dice_results_v2.cs
 The full destination is shown in the path field. Relative paths are resolved against that directory, independent of
 the process working directory. A missing filename extension gets `.csv`; other extensions are rejected.
 Parent directories are created when saving, not when opening a file or validating input.
+**Browse** also works when the path is blank or invalid. It starts in an existing directory and only
+updates the path after a successful selection; cancelling keeps the original text.
 
 Automatic append is on by default. Uncheck it to roll without writing a file, then use **Save batch** when ready.
 Existing compatible CSV records are preserved and new records are appended; the file picker does not promise to overwrite them.
@@ -52,10 +76,14 @@ the old records cannot reliably recover the original order and are not silently 
 
 ## Window and keyboard
 
-- The resizable window uses a minimum client size and scales its layout/font for per-monitor DPI changes.
+- The resizable window scales its layout/font for per-monitor DPI changes. Initial/restored bounds and DPI
+  transitions fit the current monitor work area; an unavailable saved monitor falls back to the nearest one.
+- Small/high-scale windows scroll the form instead of shrinking text or hiding controls. Action buttons wrap
+  to two rows in narrow windows. Scrollbars, mouse wheel and automatic scrolling to keyboard focus keep controls reachable.
 - Tab/Shift+Tab navigate controls; arrow keys select roll mode; Enter invokes the current default action.
 - Alt+P/B/N/D/T focus the path/browse/name/dice/times controls. Alt+R rolls, Alt+S saves the retained batch,
-  Alt+C copies the displayed log, Alt+L clears it. F1 opens About; File > Exit closes the app.
+  Alt+C copies the displayed log, Alt+L clears it. Alt+E focuses Preset, Alt+U applies it, and Alt+H focuses
+  Result history. F1 opens About; File > Exit closes the app.
 - The display retains up to 500 entries and 120,000 UTF-16 code units. Its footer reports discarded older entries.
   Each displayed group shows at most 30 dice; CSV always retains full details.
 - Copy log copies the retained display to the clipboard. Clear log clears only the display, not an unsaved batch or CSV.
@@ -65,6 +93,8 @@ the old records cannot reliably recover the original order and are not silently 
 - `DiceCore.h/.cpp`: notation parsing, input/workload limits, checked arithmetic, structured results and injectable random source.
 - `ResultStore.h/.cpp`: Unicode conversion, formatting, bounded log, stable paths and transactional CSV append.
 - `RollJob.h/.cpp`: worker lifetime, progress, cancellation and retention of results after save failure.
+- `AppSettings.h/.cpp`: validated presets/preferences, bounded versioned serialization, safe configuration replacement.
+- `WindowLayout.h/.cpp`: screen-coordinate window placement and DPI-aware minimum sizes bounded by the monitor work area.
 - `main.cpp`: Win32 controls, layout, input routing and UI state. It polls the worker; worker code never accesses an HWND.
 - `DiceRoller.rc`, `Resource.h`, `DiceRoller.manifest`: menu, About dialog, icons, IDs, visual styles and DPI declaration.
 - `tests/`: dependency-free regression executable, including tests of the application's own hidden Win32 windows.
@@ -87,4 +117,6 @@ the 32-bit tests are written to `Win32\Debug\` or `Win32\Release\`.
 Tests report failures with a nonzero exit code and clean up their own uniquely named temporary directories.
 They cover deterministic rules, invalid input, numerical boundaries, Unicode, CSV compatibility/append/failure recovery,
 cancellation, worker state, log retention, hidden-window resizing, simulated 96/144/192 DPI layout,
-Tab/arrow/Enter navigation and saving a retained batch. Actual multi-monitor visual appearance still requires a manual check.
+Tab/arrow/Enter navigation and saving a retained batch. Additional regressions cover completion while a close confirmation
+is active, invalid-path browsing, quick dice/preset lifecycle, settings corruption/save failures and high-scale scrolling.
+Actual multi-monitor visual appearance still requires a manual check.
