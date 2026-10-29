@@ -94,6 +94,60 @@ void CheckVirtualLayout(App& app) {
 }
 }
 
+void UiAdvancedTests(const std::filesystem::path& base) {
+    TestWindow test(base);
+    auto& app = test.app;
+    app.historyRoot = base / L"history";
+    SetRoll(app, L"4d1kh3+1d1", L"3");
+    SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, BST_CHECKED, 0);
+    SetWindowTextW(Control(app, IDC_TARGET_VALUE), L"4");
+    StartRoll(app); WaitUi(app);
+    CheckUi(app.history.size() == 1 && app.pending && !app.history[0].saved, "First durable batch missing.");
+    const auto firstId = app.history[0].id;
+    CheckUi(Text(Control(app, IDC_OUTPUT)).find(L"Target MET") != std::wstring::npos, "Target feedback missing from log.");
+    SetRoll(app, L"8d1", L"2");
+    SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, BST_CHECKED, 0);
+    SetWindowTextW(Control(app, IDC_POOL_VALUE), L"1");
+    StartRoll(app); WaitUi(app);
+    CheckUi(app.history.size() == 2 && app.history[0].id == firstId && app.pending, "Continuous roll lost the previous pending batch.");
+    auto restored = dice::LoadHistory(app.historyRoot);
+    CheckUi(restored.entries.size() == 2 && restored.warnings.empty(), "Unsaved batches did not survive a history reload.");
+    CheckUi(app.history[1].batch.results.front().finalValue == 8, "Pool did not count per-die successes.");
+    const auto detail = ui::FullRollDetail(app.history[0], 0);
+    CheckUi(detail.find(L"dropped") != std::wstring::npos && detail.find(L"Target >= 4: MET") != std::wstring::npos,
+        "Full history detail omitted keep/target audit information.");
+    CheckUi(ui::BatchSummary(app.history[0]).find(L"100.00%") != std::wstring::npos, "Batch target statistics are wrong.");
+    RestoreRequest(app, app.history[0].batch.request);
+    const auto reused = ReadRequest(app);
+    CheckUi(reused.notation == L"4d1kh3+1d1" && reused.target.enabled && reused.spec.successThreshold == 0 && !Busy(app),
+        "Reuse changed old results, rolled implicitly or lost rule parameters.");
+    SetWindowTextW(Control(app, IDC_FILE_EDIT), (base / L"all.csv").c_str());
+    SavePending(app); WaitUi(app);
+    CheckUi(!app.pending && app.history[0].saved && app.history[1].saved, "Combined export did not mark every batch.");
+    const auto bytes = std::filesystem::file_size(base / L"all.csv");
+    app.job.StartExport(app.history, base / L"all.csv", app.historyRoot); app.saveOnly = true; WaitUi(app);
+    CheckUi(std::filesystem::file_size(base / L"all.csv") == bytes, "Retry duplicated exported batches.");
+    restored = dice::LoadHistory(app.historyRoot);
+    CheckUi(restored.entries.size() == 2 && restored.entries[0].saved && restored.entries[1].saved, "Saved state did not survive restart.");
+    for (UINT dpi : {96u,144u,192u,288u}) {
+        ResizeClient(app, 560, 500, dpi);
+        CheckVirtualLayout(app);
+    }
+    SetWindowTextW(Control(app, IDC_PRESET), L"Rules");
+    SetWindowTextW(Control(app, IDC_GROUP), L"Character A");
+    SavePreset(app);
+    CheckUi(app.settings.presets.back().group == L"Character A" && app.settings.presets.back().target.enabled,
+        "Preset omitted group or target settings.");
+    // Durable pending results no longer require a discard confirmation on normal exit.
+    SetRoll(app); SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, BST_UNCHECKED, 0);
+    StartRoll(app); WaitUi(app);
+    int confirmations = 0;
+    app.confirm = [&](HWND, LPCWSTR, LPCWSTR, UINT) { ++confirmations; return IDNO; };
+    Close(app);
+    CheckUi(!IsWindow(app.window) && confirmations == 0 && dice::LoadHistory(app.historyRoot).entries.size() == 3,
+        "Closing failed to preserve durable pending results without discarding.");
+}
+
 void UiRegressionTests(const std::filesystem::path& base) {
     TestWindow test(base);
     auto& app = test.app;
@@ -145,7 +199,7 @@ void UiRegressionTests(const std::filesystem::path& base) {
         "Preset and quick-die controls remain enabled while rolling.");
     WaitUi(app);
     CheckUi(app.pending && app.pending->results.size() == 2, "Unsaved results were not retained.");
-    CheckUi(IsWindowEnabled(Control(app, IDC_SAVE)) && !IsWindowEnabled(Control(app, IDC_ROLL)), "Pending-batch controls incorrect.");
+    CheckUi(IsWindowEnabled(Control(app, IDC_SAVE)) && IsWindowEnabled(Control(app, IDC_ROLL)), "Continuous rolling is blocked by a pending batch.");
     CheckUi(Text(Control(app, IDC_OUTPUT)).find(L"(1) = 1 -> Final: 1") != std::wstring::npos, "Formatted output missing.");
     app.log.Clear(); RefreshLog(app);
     CheckUi(app.pending->results.size() == 2, "Clearing the display discarded unsaved results.");
@@ -170,7 +224,7 @@ void UiFeatureTests(const std::filesystem::path& base) {
             bool called = false;
             app.filePicker = [&](OPENFILENAMEW* picker) {
                 called = true;
-                CheckUi(std::wstring(picker->lpstrFile) == L"dice_results_v2.csv", "Invalid path did not fall back to a CSV filename.");
+                CheckUi(std::wstring(picker->lpstrFile) == L"dice_results_v3.csv", "Invalid path did not fall back to a CSV filename.");
                 CheckUi(picker->lpstrInitialDir && std::filesystem::is_directory(picker->lpstrInitialDir),
                     "File picker did not receive an existing initial directory.");
                 CheckUi((picker->Flags & OFN_NOCHANGEDIR) != 0, "File picker can change the working directory.");

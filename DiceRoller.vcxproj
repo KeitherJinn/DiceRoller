@@ -140,6 +140,10 @@
     <ClInclude Include="RollJob.h" />
     <ClInclude Include="AppSettings.h" />
     <ClInclude Include="WindowLayout.h" />
+    <ClInclude Include="HistoryStore.h" />
+    <ClInclude Include="DiceAnalysis.h" />
+    <ClInclude Include="PresetExchange.h" />
+    <ClInclude Include="FeatureWindows.h" />
     <ClInclude Include="DiceRoller.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
@@ -152,6 +156,10 @@
     <ClCompile Include="RollJob.cpp" />
     <ClCompile Include="AppSettings.cpp" />
     <ClCompile Include="WindowLayout.cpp" />
+    <ClCompile Include="HistoryStore.cpp" />
+    <ClCompile Include="DiceAnalysis.cpp" />
+    <ClCompile Include="PresetExchange.cpp" />
+    <ClCompile Include="FeatureWindows.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DiceRoller.rc" />

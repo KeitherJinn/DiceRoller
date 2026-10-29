@@ -6,12 +6,16 @@
 namespace dice {
 constexpr std::size_t MaxPresets = 50;
 constexpr std::size_t MaxPresetName = 64;
+constexpr std::size_t MaxPresetGroup = 64;
 
 struct Preset {
     std::wstring name;
     std::wstring notation;
     int times = 1;
     Mode mode = Mode::Normal;
+    std::wstring group;
+    int successThreshold = 0;
+    Target target;
 };
 
 // Position is in screen pixels. Size is in device-independent pixels (96 DPI).
@@ -35,6 +39,8 @@ struct AppSettings {
     bool showTimestamp = false;
     WindowSettings window;
     std::vector<Preset> presets;
+    int successThreshold = 0;
+    Target target;
 };
 
 struct SettingsLoad {

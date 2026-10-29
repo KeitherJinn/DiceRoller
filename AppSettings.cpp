@@ -8,9 +8,9 @@
 namespace dice {
 namespace {
 constexpr std::array<char, 8> Magic{ 'D', 'R', 'S', 'E', 'T', 'T', 'I', 'N' };
-constexpr std::uint32_t FormatVersion = 1;
+constexpr std::uint32_t FormatVersion = 2;
 constexpr std::size_t MaxFileBytes = 256 * 1024;
-constexpr std::size_t MaxNotation = 128;
+constexpr std::size_t MaxNotation = 1024;
 constexpr std::size_t MaxCsvPath = 32760;
 
 [[noreturn]] void SettingsError(const char* action) {
@@ -42,9 +42,18 @@ void OneLine(const std::wstring& text, std::size_t maximum, bool emptyAllowed, c
     Utf8(text);
 }
 
-void ValidateNotation(const std::wstring& notation, int times, Mode mode) {
+void ValidateNotation(const std::wstring& notation, int times, Mode mode,
+    int successThreshold, const Target& target) {
     OneLine(notation, MaxNotation, false, "Dice notation");
-    Validate(Parse(notation), times, mode);
+    Request request;
+    request.name = L"settings";
+    request.notation = notation;
+    request.spec = Parse(notation);
+    request.spec.successThreshold = successThreshold;
+    request.times = times;
+    request.mode = mode;
+    request.target = target;
+    Validate(request);
 }
 
 void U32(std::string& bytes, std::uint32_t value) {
@@ -56,6 +65,15 @@ void String(std::string& bytes, const std::wstring& text) {
     const auto utf8 = Utf8(text);
     U32(bytes, static_cast<std::uint32_t>(utf8.size()));
     bytes += utf8;
+}
+
+void Rules(std::string& bytes, int successThreshold, const Target& target) {
+    U32(bytes, static_cast<std::uint32_t>(successThreshold));
+    U32(bytes, target.enabled ? 1 : 0);
+    U32(bytes, static_cast<std::uint32_t>(target.comparison));
+    const auto value = static_cast<std::uint64_t>(target.value);
+    U32(bytes, static_cast<std::uint32_t>(value));
+    U32(bytes, static_cast<std::uint32_t>(value >> 32));
 }
 
 class Reader {
@@ -84,6 +102,19 @@ public:
             throw std::runtime_error("Settings contain an invalid roll mode.");
         return static_cast<Mode>(value);
     }
+    Target ReadTarget() {
+        Target target;
+        target.enabled = Boolean();
+        const auto comparison = U32();
+        if (comparison > static_cast<std::uint32_t>(Compare::Less))
+            throw std::runtime_error("Settings contain an invalid target comparison.");
+        target.comparison = static_cast<Compare>(comparison);
+        const auto low = static_cast<std::uint64_t>(U32());
+        const auto value = low | (static_cast<std::uint64_t>(U32()) << 32);
+        target.value = value <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+            ? static_cast<std::int64_t>(value) : -static_cast<std::int64_t>(~value) - 1;
+        return target;
+    }
     std::wstring String(std::size_t maximum) {
         const auto length = U32();
         if (length > maximum * 4) throw std::runtime_error("A settings field is too long.");
@@ -93,12 +124,15 @@ public:
         if (result.size() > maximum) throw std::runtime_error("A settings field is too long.");
         return result;
     }
-    void Header() {
+    std::uint32_t Header() {
         Need(Magic.size());
         if (!std::equal(Magic.begin(), Magic.end(), bytes_.begin()))
             throw std::runtime_error("Settings have an invalid header.");
         offset_ += Magic.size();
-        if (U32() != FormatVersion) throw std::runtime_error("Settings use an unsupported format version.");
+        const auto version = U32();
+        if (version != 1 && version != FormatVersion)
+            throw std::runtime_error("Settings use an unsupported format version.");
+        return version;
     }
     void End() const {
         if (offset_ != bytes_.size()) throw std::runtime_error("Settings contain unexpected trailing data.");
@@ -135,13 +169,19 @@ std::string Serialize(const AppSettings& settings) {
         U32(bytes, preset.times);
         U32(bytes, static_cast<std::uint32_t>(preset.mode));
     }
+    // Keep the v1 prefix stable. Version 2 appends rule options and group metadata.
+    Rules(bytes, settings.successThreshold, settings.target);
+    for (const auto& preset : settings.presets) {
+        String(bytes, preset.group);
+        Rules(bytes, preset.successThreshold, preset.target);
+    }
     if (bytes.size() > MaxFileBytes) throw std::length_error("Settings exceed the supported file size.");
     return bytes;
 }
 
 AppSettings Deserialize(const std::string& bytes) {
     Reader input(bytes);
-    input.Header();
+    const auto version = input.Header();
     AppSettings result;
     result.name = input.String(128);
     result.notation = input.String(MaxNotation);
@@ -166,6 +206,15 @@ AppSettings Deserialize(const std::string& bytes) {
         preset.mode = input.RollMode();
         result.presets.push_back(std::move(preset));
     }
+    if (version >= 2) {
+        result.successThreshold = input.Integer();
+        result.target = input.ReadTarget();
+        for (auto& preset : result.presets) {
+            preset.group = input.String(MaxPresetGroup);
+            preset.successThreshold = input.Integer();
+            preset.target = input.ReadTarget();
+        }
+    }
     input.End();
     ValidateSettings(result);
     return result;
@@ -174,7 +223,7 @@ AppSettings Deserialize(const std::string& bytes) {
 
 AppSettings DefaultSettings() {
     AppSettings settings;
-    settings.csvPath = (DefaultDirectory() / L"dice_results_v2.csv").wstring();
+    settings.csvPath = (DefaultDirectory() / L"dice_results_v3.csv").wstring();
     return settings;
 }
 
@@ -184,12 +233,13 @@ std::filesystem::path DefaultSettingsPath() {
 
 void ValidatePreset(const Preset& preset) {
     OneLine(preset.name, MaxPresetName, false, "Preset name");
-    ValidateNotation(preset.notation, preset.times, preset.mode);
+    OneLine(preset.group, MaxPresetGroup, true, "Preset group");
+    ValidateNotation(preset.notation, preset.times, preset.mode, preset.successThreshold, preset.target);
 }
 
 void ValidateSettings(const AppSettings& settings) {
     OneLine(settings.name, 128, false, "Roll name");
-    ValidateNotation(settings.notation, settings.times, settings.mode);
+    ValidateNotation(settings.notation, settings.times, settings.mode, settings.successThreshold, settings.target);
     OneLine(settings.csvPath, MaxCsvPath, true, "CSV path");
     if (!settings.csvPath.empty()) ResolvePath(settings.csvPath, std::filesystem::path(L"C:\\"));
     const auto& window = settings.window;

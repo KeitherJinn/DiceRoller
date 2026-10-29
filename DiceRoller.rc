@@ -26,7 +26,7 @@ BEGIN
     ICON IDI_DICEROLLER,IDC_STATIC,12,12,21,20
     LTEXT "Dice Roller - Win32 desktop application",IDC_STATIC,42,12,196,12
     LTEXT "Advantage / Disadvantage compares two complete dice groups.",IDC_STATIC,12,40,226,24
-    LTEXT "CSV format v2: UTF-8, ordered rolls and full dice details.",IDC_STATIC,12,66,226,12
+    LTEXT "Local history, recovery and deduplicated CSV v3 exports.",IDC_STATIC,12,66,226,12
     DEFPUSHBUTTON "OK",IDOK,188,84,50,14,WS_GROUP
 END
 STRINGTABLE

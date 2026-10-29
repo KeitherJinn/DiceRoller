@@ -1,4 +1,5 @@
 #include "ResultStore.h"
+#include "DiceAnalysis.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <algorithm>
@@ -48,7 +49,10 @@ std::string DiceList(const Group& group, std::size_t limit) {
     std::ostringstream out;
     for (std::size_t i = 0; i < group.dice.size() && i < limit; ++i) {
         if (i) out << ',';
+        const bool dropped = !group.kept.empty() && !group.kept.at(i);
+        if (dropped) out << '[';
         out << group.dice[i];
+        if (dropped) out << " dropped]";
     }
     if (group.dice.size() > limit) out << ",... +" << group.dice.size() - limit << " more";
     return out.str();
@@ -128,6 +132,9 @@ std::wstring FormatResult(const Request& request, const Result& result, std::siz
     if (request.spec.modifier != 0)
         out << L" (modifier " << (request.spec.modifier > 0 ? L"+" : L"") << request.spec.modifier << L')';
     out << L" -> Final: " << result.finalValue;
+    if (request.spec.successThreshold) out << L" successes (each kept die >= " << request.spec.successThreshold << L')';
+    if (request.target.enabled) out << (EvaluateTarget(result.finalValue, request.target) ? L" | Target MET" : L" | Target NOT MET")
+        << L"; margin " << TargetMargin(result.finalValue, request.target);
     if (request.showTimestamp) out << L" @ " << Wide(result.timestamp);
     return out.str() + L"\r\n";
 }
@@ -158,6 +165,8 @@ std::filesystem::path ResolvePath(const std::wstring& input, const std::filesyst
 }
 
 void AppendCsv(const std::filesystem::path& path, const Batch& batch, const CancelCheck& cancelled) {
+    if (!batch.request.spec.terms.empty() || batch.request.spec.successThreshold || batch.request.target.enabled)
+        throw std::invalid_argument("Advanced dice rules require the v3 history export format.");
     if (batch.results.empty()) throw std::invalid_argument("There are no results to save.");
     CheckCancel(cancelled);
     std::error_code ec;

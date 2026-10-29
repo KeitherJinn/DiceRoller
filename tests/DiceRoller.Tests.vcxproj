@@ -38,11 +38,19 @@
     <ClCompile Include="Tests.cpp" />
     <ClCompile Include="UiTests.cpp" />
     <ClCompile Include="SettingsTests.cpp" />
+    <ClCompile Include="AnalysisTests.cpp" />
+    <ClCompile Include="HistoryTests.cpp" />
+    <ClCompile Include="PresetTests.cpp" />
+    <ClCompile Include="FeatureWindowTests.cpp" />
+    <ClCompile Include="WorkerHistoryTests.cpp" />
     <ClCompile Include="..\DiceCore.cpp" />
     <ClCompile Include="..\ResultStore.cpp" />
     <ClCompile Include="..\RollJob.cpp" />
     <ClCompile Include="..\AppSettings.cpp" />
     <ClCompile Include="..\WindowLayout.cpp" />
+    <ClCompile Include="..\HistoryStore.cpp" />
+    <ClCompile Include="..\DiceAnalysis.cpp" />
+    <ClCompile Include="..\PresetExchange.cpp" />
   </ItemGroup>
   <ItemGroup><ResourceCompile Include="..\DiceRoller.rc" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

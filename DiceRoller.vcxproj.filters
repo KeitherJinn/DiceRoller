@@ -23,6 +23,10 @@
     <ClInclude Include="RollJob.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="AppSettings.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="WindowLayout.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="HistoryStore.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="DiceAnalysis.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="PresetExchange.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="FeatureWindows.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="targetver.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -42,6 +46,10 @@
     <ClCompile Include="RollJob.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="AppSettings.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="WindowLayout.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="HistoryStore.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="DiceAnalysis.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="PresetExchange.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="FeatureWindows.cpp"><Filter>源文件</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DiceRoller.rc">

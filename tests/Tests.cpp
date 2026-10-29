@@ -16,6 +16,12 @@ void SettingsRegressionTests(const std::filesystem::path& base);
 void UiFeatureTests(const std::filesystem::path& base);
 void UiCloseTests(const std::filesystem::path& base);
 void UiViewportTests(const std::filesystem::path& base);
+void AnalysisTests();
+void HistoryTests();
+void PresetTests();
+void FeatureWindowTests();
+void WorkerHistoryTests();
+void UiAdvancedTests(const std::filesystem::path& base);
 namespace {
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -232,6 +238,13 @@ int main() {
         Throws([&] { AppendCsv(path, Fixture()); });
         Require(Read(path) == old, "Legacy CSV modified.");
     });
+    test("legacy export cannot silently drop advanced rule metadata", [] {
+        TempDirectory temp;
+        auto batch = Fixture();
+        batch.request.target = {true, Compare::AtLeast, 5};
+        Throws([&] { AppendCsv(temp.root / L"legacy.csv", batch); });
+        Require(!fs::exists(temp.root / L"legacy.csv"), "Advanced rules were exported in an incomplete legacy format.");
+    });
     test("cancellation before commit preserves original", [] {
         TempDirectory temp;
         const auto path = temp.root / L"cancel.csv";
@@ -337,6 +350,14 @@ int main() {
     test("high DPI work area, scroll reachability and window placement", [] {
         TempDirectory temp;
         UiViewportTests(temp.root);
+    });
+    test("mixed dice, keep rules, pools, targets, statistics and probability", [] { AnalysisTests(); });
+    test("durable history, recovery checkpoints and idempotent combined export", [] { HistoryTests(); });
+    test("preset exchange, groups, duplicate strategies and atomic preservation", [] { PresetTests(); });
+    test("history and probability native windows, DPI, charts and cancellation", [] { FeatureWindowTests(); });
+    test("worker checkpoints, failed export recovery and exact-result retries", [] { WorkerHistoryTests(); });
+    test("continuous batches, target rules, recovery and combined export UI integration", [] {
+        TempDirectory temp; UiAdvancedTests(temp.root);
     });
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed ? 1 : 0;
