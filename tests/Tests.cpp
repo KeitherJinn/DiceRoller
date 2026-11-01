@@ -22,6 +22,11 @@ void PresetTests();
 void FeatureWindowTests();
 void WorkerHistoryTests();
 void UiAdvancedTests(const std::filesystem::path& base);
+void UiInteractionTests(const std::filesystem::path& base);
+void MainLayoutTests(const std::filesystem::path& base);
+void SingleInstanceTests();
+int SingleInstanceProbe(const std::wstring& name);
+int SingleInstanceCrashProbe(const std::wstring& name, const std::wstring& ready, const std::wstring& release);
 namespace {
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -81,7 +86,10 @@ Outcome Wait(RollJob& job) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--instance-probe") return SingleInstanceProbe(Wide(argv[2]));
+    if (argc == 5 && std::string(argv[1]) == "--instance-crash-probe")
+        return SingleInstanceCrashProbe(Wide(argv[2]), Wide(argv[3]), Wide(argv[4]));
     int passed = 0;
     int failed = 0;
     auto test = [&](const char* name, auto action) {
@@ -358,6 +366,13 @@ int main() {
     test("worker checkpoints, failed export recovery and exact-result retries", [] { WorkerHistoryTests(); });
     test("continuous batches, target rules, recovery and combined export UI integration", [] {
         TempDirectory temp; UiAdvancedTests(temp.root);
+    });
+    test("single instance across processes, shutdown and abandoned ownership", [] { SingleInstanceTests(); });
+    test("independent input validation, group navigation, disabled rule memory and index startup", [] {
+        TempDirectory temp; UiInteractionTests(temp.root);
+    });
+    test("responsive main layout, measured text and fixed actions at high DPI", [] {
+        TempDirectory temp; MainLayoutTests(temp.root);
     });
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed ? 1 : 0;

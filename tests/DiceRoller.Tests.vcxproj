@@ -43,6 +43,8 @@
     <ClCompile Include="PresetTests.cpp" />
     <ClCompile Include="FeatureWindowTests.cpp" />
     <ClCompile Include="WorkerHistoryTests.cpp" />
+    <ClCompile Include="SingleInstanceTests.cpp" />
+    <ClCompile Include="..\SingleInstance.cpp" />
     <ClCompile Include="..\DiceCore.cpp" />
     <ClCompile Include="..\ResultStore.cpp" />
     <ClCompile Include="..\RollJob.cpp" />
@@ -53,5 +55,6 @@
     <ClCompile Include="..\PresetExchange.cpp" />
   </ItemGroup>
   <ItemGroup><ResourceCompile Include="..\DiceRoller.rc" /></ItemGroup>
+  <ItemGroup><ClInclude Include="MainLayoutTests.inl" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

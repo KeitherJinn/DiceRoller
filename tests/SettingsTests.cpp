@@ -33,7 +33,7 @@ bool Equal(const dice::AppSettings& a, const dice::AppSettings& b) {
         a.window.valid != b.window.valid || a.window.x != b.window.x || a.window.y != b.window.y ||
         a.window.width != b.window.width || a.window.height != b.window.height ||
         a.window.maximized != b.window.maximized || a.presets.size() != b.presets.size() ||
-        a.successThreshold != b.successThreshold || a.target.enabled != b.target.enabled ||
+        a.successThreshold != b.successThreshold || a.poolEnabled != b.poolEnabled || a.target.enabled != b.target.enabled ||
         a.target.comparison != b.target.comparison || a.target.value != b.target.value) return false;
     for (std::size_t i = 0; i < a.presets.size(); ++i) {
         if (a.presets[i].name != b.presets[i].name || a.presets[i].notation != b.presets[i].notation ||
@@ -58,9 +58,8 @@ std::size_t SkipString(const std::string& bytes, std::size_t offset) {
     Require(offset + count <= bytes.size(), "Invalid settings fixture string size.");
     return offset + count;
 }
-// Construct the documented v1 layout independently from the production writer.
-// A v2 writer must not accidentally turn this compatibility test into v2-only coverage.
-std::string LegacySettings(const dice::AppSettings& settings) {
+// Construct v1/v2 independently; production schema changes cannot erase coverage.
+std::string LegacySettings(const dice::AppSettings& settings, unsigned version = 1) {
     std::string bytes = "DRSETTIN";
     auto number = [&](std::uint32_t value) {
         for (unsigned shift = 0; shift < 32; shift += 8)
@@ -71,7 +70,7 @@ std::string LegacySettings(const dice::AppSettings& settings) {
         number(static_cast<std::uint32_t>(encoded.size()));
         bytes += encoded;
     };
-    number(1); text(settings.name); text(settings.notation); text(settings.csvPath);
+    number(version); text(settings.name); text(settings.notation); text(settings.csvPath);
     number(settings.times); number(static_cast<std::uint32_t>(settings.mode));
     number(settings.autoSave); number(settings.showTimestamp); number(settings.window.valid);
     number(static_cast<std::uint32_t>(settings.window.x)); number(static_cast<std::uint32_t>(settings.window.y));
@@ -79,6 +78,16 @@ std::string LegacySettings(const dice::AppSettings& settings) {
     number(static_cast<std::uint32_t>(settings.presets.size()));
     for (const auto& preset : settings.presets) {
         text(preset.name); text(preset.notation); number(preset.times); number(static_cast<std::uint32_t>(preset.mode));
+    }
+    if (version == 2) {
+        auto rules = [&](int threshold, const dice::Target& target) {
+            number(static_cast<std::uint32_t>(threshold)); number(target.enabled);
+            number(static_cast<std::uint32_t>(target.comparison));
+            const auto value = static_cast<std::uint64_t>(target.value);
+            number(static_cast<std::uint32_t>(value)); number(static_cast<std::uint32_t>(value >> 32));
+        };
+        rules(settings.poolEnabled ? settings.successThreshold : 0, settings.target);
+        for (const auto& preset : settings.presets) { text(preset.group); rules(preset.successThreshold, preset.target); }
     }
     return bytes;
 }
@@ -111,6 +120,7 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
                          { L"伤害", L"2d6+3", 1, Mode::Normal },
                          { L"劣势", L"d12", 3, Mode::Disadvantage } };
     original.target = { true, Compare::AtLeast, 8 };
+    original.successThreshold = 11; // Disabled thresholds must still be remembered.
     original.presets.front().group = L"角色 😀";
     original.presets.front().target = { true, Compare::Equal, 20 };
     original.presets.push_back({ L"骰池", L"8d10", 1, Mode::Normal, L"角色 B", 8,
@@ -120,12 +130,13 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
     Require(loaded.found && loaded.warning.empty() && Equal(loaded.settings, original),
         "Unicode settings, negative screen positions and presets must round-trip exactly.");
     const auto bytes = Read(path);
-    Require(static_cast<unsigned char>(bytes[8]) == 2, "Settings must be written with the v2 schema.");
+    Require(static_cast<unsigned char>(bytes[8]) == 3, "Settings must be written with the v3 schema.");
     const auto legacyPath = directory / L"legacy-v1.bin";
     const auto legacyBytes = LegacySettings(original);
     Put(legacyPath, legacyBytes);
     auto legacyExpected = original;
-    legacyExpected.successThreshold = 0;
+    legacyExpected.successThreshold = 8;
+    legacyExpected.poolEnabled = false;
     legacyExpected.target = {};
     for (auto& preset : legacyExpected.presets) { preset.group.clear(); preset.successThreshold = 0; preset.target = {}; }
     const auto legacyLoaded = LoadSettings(legacyPath, defaults);
@@ -133,11 +144,27 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
         "Version 1 settings must retain old fields and default all new rule/group fields.");
     Require(Read(legacyPath) == legacyBytes, "Loading v1 settings must not rewrite or back up the file.");
     SaveSettings(legacyPath, legacyLoaded.settings);
-    Require(static_cast<unsigned char>(Read(legacyPath)[8]) == 2 && Equal(LoadSettings(legacyPath, defaults).settings, legacyExpected),
-        "Saving loaded v1 settings must migrate to v2 without changing their preferences.");
+    Require(static_cast<unsigned char>(Read(legacyPath)[8]) == 3 && Equal(LoadSettings(legacyPath, defaults).settings, legacyExpected),
+        "Saving loaded v1 settings must migrate to v3 without changing their preferences.");
+
+    const auto version2Path = directory / L"legacy-v2.bin";
+    Put(version2Path, LegacySettings(original, 2));
+    auto version2Expected = original;
+    version2Expected.successThreshold = 8;
+    const auto version2Disabled = LoadSettings(version2Path, defaults);
+    Require(version2Disabled.warning.empty() && Equal(version2Disabled.settings, version2Expected),
+        "A v2 zero threshold must migrate to a disabled pool with remembered value 8.");
 
     auto poolSettings = original;
-    poolSettings.notation = L"8d10"; poolSettings.mode = Mode::Normal; poolSettings.successThreshold = 8;
+    poolSettings.notation = L"8d10"; poolSettings.mode = Mode::Normal; poolSettings.successThreshold = 8; poolSettings.poolEnabled = true;
+    Put(version2Path, LegacySettings(poolSettings, 2));
+    const auto version2Bytes = Read(version2Path);
+    const auto version2Enabled = LoadSettings(version2Path, defaults);
+    Require(version2Enabled.warning.empty() && Equal(version2Enabled.settings, poolSettings) && Read(version2Path) == version2Bytes,
+        "A v2 positive threshold must enable its pool without changing the value or file.");
+    SaveSettings(version2Path, version2Enabled.settings);
+    Require(static_cast<unsigned char>(Read(version2Path)[8]) == 3 && Equal(LoadSettings(version2Path, defaults).settings, poolSettings),
+        "Saving migrated v2 settings must preserve pool state in v3.");
     const auto rulesPath = directory / L"all-rules.bin";
     for (const auto comparison : { Compare::AtLeast, Compare::AtMost, Compare::Equal, Compare::Greater, Compare::Less }) {
         for (const auto value : { (std::numeric_limits<std::int64_t>::min)(), (std::numeric_limits<std::int64_t>::max)() }) {
@@ -147,6 +174,13 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
                 "All target comparisons, 64-bit extremes and global pool settings must round-trip.");
         }
     }
+    auto disabledRules = original;
+    disabledRules.target = {false, Compare::Less, -15};
+    disabledRules.poolEnabled = false;
+    disabledRules.successThreshold = 17;
+    SaveSettings(rulesPath, disabledRules);
+    Require(Equal(LoadSettings(rulesPath, defaults).settings, disabledRules),
+        "Disabled target and pool controls must retain their edited values across restart.");
     const auto firstBackup = BackupSettings(path);
     const auto secondBackup = BackupSettings(path);
     Require(firstBackup != secondBackup && firstBackup.parent_path() == directory && secondBackup.parent_path() == directory,
@@ -198,6 +232,9 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
         SetU32(bad, legacyBytes.size() + mutation.first, mutation.second);
         rejectedLoad(bad);
     }
+    bad = bytes;
+    SetU32(bad, bytes.size() - 4, 2);
+    rejectedLoad(bad);
     const auto damagedBackup = BackupSettings(damaged);
     Require(Read(damagedBackup) == bad && Read(damaged) == bad,
         "An invalid configuration must be backed up verbatim without being parsed or rewritten.");
@@ -257,6 +294,12 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
     rejectedSave(invalid);
     invalid = original;
     invalid.successThreshold = -1;
+    rejectedSave(invalid);
+    invalid = original;
+    invalid.successThreshold = 0;
+    rejectedSave(invalid);
+    invalid = original;
+    invalid.poolEnabled = true; // The expression has +3, which is ambiguous in pool mode.
     rejectedSave(invalid);
     invalid = original;
     invalid.target.comparison = static_cast<Compare>(99);

@@ -128,6 +128,85 @@ void Normalize(Distribution& distribution) {
     if (!(sum > 0) || !std::isfinite(sum)) throw std::runtime_error("Probability calculation failed.");
     for (auto& item : distribution) item.second /= sum;
 }
+long double IntegerDifference(std::int64_t value, std::int64_t origin) {
+    // Subtract in integer space before floating conversion. Unsigned subtraction
+    // also represents distances that span INT64_MIN through INT64_MAX safely.
+    return value >= origin
+        ? static_cast<long double>(static_cast<std::uint64_t>(value) - static_cast<std::uint64_t>(origin))
+        : -static_cast<long double>(static_cast<std::uint64_t>(origin) - static_cast<std::uint64_t>(value));
+}
+struct IntegerSum {
+    // Two-limb two's-complement sum: exact for any in-memory vector of int64s.
+    // MSVC has no portable int128 and its long double has double precision.
+    std::uint64_t high = 0, low = 0;
+    void Add(std::int64_t value) {
+        const auto previous = low;
+        low += static_cast<std::uint64_t>(value);
+        high += (value < 0 ? UINT64_MAX : 0) + (low < previous ? 1 : 0);
+    }
+};
+std::pair<std::uint64_t, std::uint64_t> Divide(std::uint64_t high, std::uint64_t low, std::uint64_t denominator) {
+    std::uint64_t quotient = 0, remainder = 0;
+    for (int bit = 127; bit >= 0; --bit) {
+        const bool overflow = (remainder >> 63) != 0;
+        const auto incoming = bit >= 64 ? ((high >> (bit - 64)) & 1) : ((low >> bit) & 1);
+        remainder = (remainder << 1) | incoming;
+        if (overflow || remainder >= denominator) {
+            remainder -= denominator;
+            // The absolute mean of int64 values always fits in uint64.
+            if (bit >= 64) throw std::overflow_error("The mean exceeds its supported range.");
+            quotient |= std::uint64_t(1) << bit;
+        }
+    }
+    return {quotient, remainder};
+}
+std::wstring DecimalText(bool negative, std::uint64_t whole, unsigned thousandths) {
+    if (thousandths == 1000) { ++whole; thousandths = 0; }
+    std::wstring text = negative && (whole || thousandths) ? L"-" : L"";
+    text += std::to_wstring(whole);
+    if (thousandths) {
+        auto digits = std::to_wstring(thousandths + 1000).substr(1);
+        while (digits.back() == L'0') digits.pop_back();
+        text += L'.' + digits;
+    }
+    return text;
+}
+std::wstring MeanText(IntegerSum sum, std::uint64_t count, double* approximate = nullptr) {
+    const bool negative = (sum.high >> 63) != 0;
+    if (negative) {
+        sum.low = ~sum.low + 1;
+        sum.high = ~sum.high + (sum.low == 0 ? 1 : 0);
+    }
+    auto parts = Divide(sum.high, sum.low, count);
+    if (approximate) {
+        const auto value = static_cast<double>(parts.first) + static_cast<double>(parts.second) / static_cast<double>(count);
+        *approximate = negative ? -value : value;
+    }
+    unsigned decimal = 0;
+    for (int place = 0; place < 4; ++place) {
+        // Long division by one decimal digit, without overflowing remainder*10.
+        std::uint64_t remainder = 0;
+        unsigned digit = 0;
+        for (int step = 0; step < 10; ++step) {
+            if (parts.second >= count - remainder) { remainder = parts.second - (count - remainder); ++digit; }
+            else remainder += parts.second;
+        }
+        parts.second = remainder;
+        if (place < 3) decimal = decimal * 10 + digit;
+        else if (digit >= 5) ++decimal;
+    }
+    return DecimalText(negative, parts.first, decimal);
+}
+std::wstring OffsetText(std::int64_t origin, long double offset) {
+    // Valid expressions span at most 1000*INT_MAX. Separate the small fractional
+    // offset before adding its integer part to the potentially huge origin.
+    const auto integerOffset = static_cast<std::int64_t>(std::floor(offset));
+    const auto whole = CheckedAdd(origin, integerOffset);
+    const auto fraction = offset - integerOffset;
+    if (whole >= 0) return DecimalText(false, static_cast<std::uint64_t>(whole), static_cast<unsigned>(std::llround(fraction * 1000)));
+    auto magnitude = std::uint64_t(0) - static_cast<std::uint64_t>(whole);
+    return fraction > 0 ? DecimalText(true, magnitude - 1, static_cast<unsigned>(std::llround((1 - fraction) * 1000))) : DecimalText(true, magnitude, 0);
+}
 }
 
 bool EvaluateTarget(std::int64_t value, const Target& target) {
@@ -167,18 +246,22 @@ Statistics Summarize(const Batch& batch) {
     result.hasTarget = batch.request.target.enabled;
     if (!result.count) return result;
     result.minimum = result.maximum = batch.results.front().finalValue;
-    long double mean = 0, squared = 0;
+    const auto origin = batch.results.front().finalValue;
+    long double meanOffset = 0, squared = 0;
+    IntegerSum exactSum;
     std::size_t count = 0;
     for (const auto& roll : batch.results) {
         result.minimum = (std::min)(result.minimum, roll.finalValue);
         result.maximum = (std::max)(result.maximum, roll.finalValue);
         ++result.frequencies[roll.finalValue];
         if (EvaluateTarget(roll.finalValue, batch.request.target)) ++result.matched;
-        const long double delta = static_cast<long double>(roll.finalValue) - mean;
-        mean += delta / static_cast<long double>(++count);
-        squared += delta * (static_cast<long double>(roll.finalValue) - mean);
+        exactSum.Add(roll.finalValue);
+        const auto offset = IntegerDifference(roll.finalValue, origin);
+        const auto delta = offset - meanOffset;
+        meanOffset += delta / static_cast<long double>(++count);
+        squared += delta * (offset - meanOffset);
     }
-    result.mean = static_cast<double>(mean);
+    result.meanText = MeanText(exactSum, static_cast<std::uint64_t>(result.count), &result.mean);
     result.standardDeviation = std::sqrt((std::max)(0.0, static_cast<double>(squared / result.count)));
     result.matchedProportion = static_cast<double>(result.matched) / result.count;
     const std::size_t lowerIndex = (result.count - 1) / 2, upperIndex = result.count / 2;
@@ -191,7 +274,8 @@ Statistics Summarize(const Batch& batch) {
     }
     // Split integer halves before conversion: INT64_MIN and INT64_MAX have
     // median -0.5, which is lost if both endpoints are rounded to double first.
-    result.median = static_cast<double>(lower / 2 + upper / 2) + static_cast<double>(lower % 2 + upper % 2) / 2.0;
+    IntegerSum middle; middle.Add(lower); middle.Add(upper);
+    result.medianText = MeanText(middle, 2, &result.median);
     return result;
 }
 
@@ -224,12 +308,14 @@ Probability Analyze(const Request& request, const CancelCheck& cancelled) {
         result.method = L"Monte Carlo estimate (fixed seed; 95% target-proportion error bound)";
     }
     Normalize(result.distribution);
-    long double mean = 0;
+    long double meanOffset = 0;
     for (const auto& item : result.distribution) {
-        mean += static_cast<long double>(item.first) * item.second;
+        meanOffset += IntegerDifference(item.first, result.minimum) * item.second;
         if (EvaluateTarget(item.first, request.target)) result.matchedProportion += item.second;
     }
-    result.mean = static_cast<double>(mean);
+    meanOffset = (std::clamp)(meanOffset, 0.0L, IntegerDifference(result.maximum, result.minimum));
+    result.mean = static_cast<double>(static_cast<long double>(result.minimum) + meanOffset);
+    result.meanText = OffsetText(result.minimum, meanOffset);
     result.matchedProportion = (std::clamp)(result.matchedProportion, 0.0, 1.0);
     Cancel(cancelled);
     return result;

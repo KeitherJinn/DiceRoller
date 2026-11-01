@@ -15,6 +15,8 @@ struct Statistics {
     std::size_t matched = 0;
     double matchedProportion = 0;
     bool hasTarget = false;
+    // UI representations preserve all integer digits, rounded to 3 decimals.
+    std::wstring meanText = L"0", medianText = L"0";
 };
 struct Probability {
     bool exact = true;
@@ -28,6 +30,7 @@ struct Probability {
     // not an error bound for the mean or for all histogram bins simultaneously.
     double marginOfError95 = 0;
     std::wstring method;
+    std::wstring meanText = L"0";
 };
 Statistics Summarize(const Batch& batch);
 // Bounded exact convolution/enumeration, otherwise fixed-seed Monte Carlo.

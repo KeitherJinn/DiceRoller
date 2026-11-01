@@ -39,8 +39,9 @@ struct AppSettings {
     bool showTimestamp = false;
     WindowSettings window;
     std::vector<Preset> presets;
-    int successThreshold = 0;
+    int successThreshold = 8; // Remembered even while pool mode is disabled.
     Target target;
+    bool poolEnabled = false;
 };
 
 struct SettingsLoad {

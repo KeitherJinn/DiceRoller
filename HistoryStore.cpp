@@ -92,8 +92,11 @@ void String(std::string& out, const std::string& value) { U32(out, static_cast<s
 void String(std::string& out, const std::wstring& value) { String(out, Utf8(value)); }
 class Reader {
 public:
-    explicit Reader(const std::string& bytes) : bytes_(bytes) {}
-    void Need(std::size_t count) const { if (count > bytes_.size() - offset_) throw std::runtime_error("History record is truncated."); }
+    explicit Reader(const std::string& bytes, std::function<void(std::size_t)> fill = {}) : bytes_(bytes), fill_(std::move(fill)) {}
+    void Need(std::size_t count) const {
+        if (count > bytes_.size() - offset_ && fill_) fill_(offset_ + count);
+        if (count > bytes_.size() - offset_) throw std::runtime_error("History record is truncated.");
+    }
     std::uint32_t U32() {
         Need(4); std::uint32_t value = 0;
         for (unsigned shift = 0; shift < 32; shift += 8) value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes_[offset_++])) << shift;
@@ -116,8 +119,10 @@ public:
         if (U32() != 1) throw std::runtime_error("History record uses an unsupported version.");
     }
     void End() const { if (offset_ != bytes_.size()) throw std::runtime_error("History contains unexpected trailing bytes."); }
+    std::size_t Consumed() const { return offset_; }
 private:
     const std::string& bytes_;
+    std::function<void(std::size_t)> fill_;
     std::size_t offset_ = 0;
 };
 void WriteGroup(std::string& bytes, const Group& group) {
@@ -131,10 +136,11 @@ Group ReadGroup(Reader& input, std::size_t& remaining) {
     for (std::size_t i = 0; i < count; ++i) { group.dice.push_back(input.Int()); group.sides.push_back(input.Int()); group.kept.push_back(input.Bool()); }
     return group;
 }
-std::string Serialize(const HistoryEntry& entry, std::size_t count, bool saveState) {
+std::string Serialize(const HistoryEntry& entry, std::size_t count, bool saveState,
+                      const HistorySummary* state = nullptr, const CancelCheck& cancelled = {}) {
     std::string bytes(Magic, 8); U32(bytes, 1);
-    String(bytes, entry.id); String(bytes, entry.created); U32(bytes, saveState && entry.saved ? 1 : 0);
-    String(bytes, saveState ? entry.exportedPath : std::wstring{});
+    String(bytes, entry.id); String(bytes, entry.created); U32(bytes, saveState && (state ? state->saved : entry.saved) ? 1 : 0);
+    String(bytes, saveState ? (state ? state->exportedPath : entry.exportedPath) : std::wstring{});
     const auto& request = entry.batch.request; const auto& spec = request.spec;
     String(bytes, request.name); String(bytes, request.notation);
     U32(bytes, spec.count); U32(bytes, spec.sides); I64(bytes, spec.modifier);
@@ -145,6 +151,7 @@ std::string Serialize(const HistoryEntry& entry, std::size_t count, bool saveSta
     U32(bytes, static_cast<std::uint32_t>(request.target.comparison)); I64(bytes, request.target.value);
     U32(bytes, static_cast<std::uint32_t>(count));
     for (std::size_t i = 0; i < count; ++i) {
+        CheckCancel(cancelled);
         const auto& result = entry.batch.results[i]; WriteGroup(bytes, result.first);
         U32(bytes, result.second ? 1 : 0); if (result.second) WriteGroup(bytes, *result.second);
         I64(bytes, result.chosen); I64(bytes, result.finalValue); String(bytes, result.timestamp);
@@ -152,7 +159,7 @@ std::string Serialize(const HistoryEntry& entry, std::size_t count, bool saveSta
     if (bytes.size() > MaxRecordBytes) throw std::length_error("History record is too large.");
     return bytes;
 }
-HistoryEntry Deserialize(const std::string& bytes) {
+HistoryEntry Deserialize(const std::string& bytes, const CancelCheck& cancelled = {}) {
     Reader input(bytes); input.Header(); HistoryEntry entry;
     entry.id = input.String(36); entry.created = input.String(24); entry.saved = input.Bool(); entry.exportedPath = input.WideString(32760);
     auto& request = entry.batch.request; auto& spec = request.spec;
@@ -165,16 +172,18 @@ HistoryEntry Deserialize(const std::string& bytes) {
     request.target.comparison = static_cast<Compare>(input.U32()); request.target.value = input.I64();
     const auto count = input.Count(MaxRolls); std::size_t remaining = static_cast<std::size_t>(MaxWork);
     for (std::size_t i = 0; i < count; ++i) {
+        CheckCancel(cancelled);
         Result result; result.first = ReadGroup(input, remaining); if (input.Bool()) result.second = ReadGroup(input, remaining);
         result.chosen = input.I64(); result.finalValue = input.I64(); result.timestamp = input.String(64); entry.batch.results.push_back(std::move(result));
     }
-    input.End(); ValidateHistoryEntry(entry); return entry;
+    input.End(); ValidateHistoryEntry(entry, cancelled); return entry;
 }
-std::string ReadBytes(HANDLE file, std::size_t limit) {
+std::string ReadBytes(HANDLE file, std::size_t limit, const CancelCheck& cancelled = {}) {
     LARGE_INTEGER size{}; if (!GetFileSizeEx(file, &size)) IoError("Could not read history size");
     if (size.QuadPart < 0 || static_cast<std::uint64_t>(size.QuadPart) > limit) throw std::runtime_error("History file exceeds its size limit.");
     std::string bytes(static_cast<std::size_t>(size.QuadPart), '\0'); std::size_t offset = 0;
     while (offset < bytes.size()) {
+        CheckCancel(cancelled);
         DWORD read = 0;
         if (!ReadFile(file, bytes.data() + offset, static_cast<DWORD>((std::min)(bytes.size() - offset, std::size_t(65536))), &read, nullptr)) IoError("Could not read history");
         if (!read) throw std::runtime_error("History file is incomplete."); offset += read;
@@ -318,6 +327,50 @@ public:
 private:
     HANDLE file_; std::array<char, 65536> buffer_{}; std::size_t position_ = 0, used_ = 0;
 };
+
+HistorySummary ReadSummary(HANDLE file, bool archived, const CancelCheck& cancelled) {
+    LARGE_INTEGER length{};
+    if (!GetFileSizeEx(file, &length)) IoError("Could not read history size");
+    if (length.QuadPart < 0 || length.QuadPart > static_cast<LONGLONG>(MaxRecordBytes))
+        throw std::runtime_error("History record exceeds its size limit.");
+    const auto size = static_cast<std::size_t>(length.QuadPart);
+    std::string prefix;
+    Reader input(prefix, [&](std::size_t need) {
+        // Metadata has bounded fields; prefetch at most one 4 KiB page beyond it.
+        // No per-die result vectors are allocated during indexing.
+        while (prefix.size() < need && prefix.size() < size) {
+            CheckCancel(cancelled); std::array<char, 4096> page{}; DWORD read = 0;
+            const auto amount = static_cast<DWORD>((std::min)(page.size(), size - prefix.size()));
+            if (!ReadFile(file, page.data(), amount, &read, nullptr)) IoError("Could not read history metadata");
+            if (!read) throw std::runtime_error("History metadata is truncated.");
+            prefix.append(page.data(), read);
+        }
+    });
+    input.Header(); HistoryEntry entry;
+    entry.id = input.String(36); entry.created = input.String(24); entry.saved = input.Bool(); entry.exportedPath = input.WideString(32760);
+    auto& request = entry.batch.request; auto& spec = request.spec;
+    request.name = input.WideString(128); request.notation = input.WideString(1024);
+    spec.count = input.Int(); spec.sides = input.Int(); spec.modifier = input.I64();
+    const auto terms = input.Count(MaxDice);
+    for (std::size_t i = 0; i < terms; ++i) {
+        Term term; term.count = input.Int(); term.sides = input.Int(); term.keep = input.Int(); term.keepHighest = input.Bool();
+        spec.terms.push_back(term);
+    }
+    spec.successThreshold = input.Int(); request.mode = static_cast<Mode>(input.U32()); request.times = input.Int();
+    request.showTimestamp = input.Bool(); request.target.enabled = input.Bool();
+    request.target.comparison = static_cast<Compare>(input.U32()); request.target.value = input.I64();
+    const auto count = input.Count(MaxRolls);
+    ValidateHistoryEntry(entry, cancelled);
+    if (count > static_cast<std::size_t>(request.times)) throw std::runtime_error("History contains too many completed results.");
+    const auto groups = request.mode == Mode::Normal ? std::size_t(1) : std::size_t(2);
+    const auto minimum = count * (groups * (12 + static_cast<std::size_t>(spec.count) * 12) + 24);
+    const auto remaining = size - input.Consumed();
+    if (remaining < minimum || remaining > minimum + count * 64)
+        throw std::runtime_error("History result data is incomplete or has an invalid length.");
+    auto summary = SummaryOf(entry); summary.resultCount = count; summary.archived = archived;
+    if (archived && !summary.saved) throw std::runtime_error("An archived history record is not exported.");
+    return summary;
+}
 }
 
 std::filesystem::path DefaultHistoryDirectory() { return DefaultDirectory().parent_path() / L"History"; }
@@ -325,7 +378,8 @@ HistoryEntry NewHistoryEntry(Batch batch) {
     HistoryEntry entry{NewId(), UtcNow(), std::move(batch), false, {}};
     ValidateHistoryEntry(entry); return entry;
 }
-void ValidateHistoryEntry(const HistoryEntry& entry) {
+void ValidateHistoryEntry(const HistoryEntry& entry, const CancelCheck& cancelled) {
+    CheckCancel(cancelled);
     if (!ValidId(entry.id) || !ValidCreated(entry.created)) throw std::runtime_error("History has an invalid ID or creation time.");
     const auto& request = entry.batch.request; Validate(request);
     TextField(request.name, 128, false); TextField(request.notation, 1024, false); TextField(entry.exportedPath, 32760, !entry.saved);
@@ -340,6 +394,7 @@ void ValidateHistoryEntry(const HistoryEntry& entry) {
     }
     if (entry.batch.results.size() > static_cast<std::size_t>(request.times)) throw std::runtime_error("History has more results than requested.");
     for (const auto& result : entry.batch.results) {
+        CheckCancel(cancelled);
         TextField(Wide(result.timestamp), 64, true);
         std::size_t used = 0;
         const auto firstCount = result.first.dice.size();
@@ -348,28 +403,105 @@ void ValidateHistoryEntry(const HistoryEntry& entry) {
             if (index < firstCount) return result.first.dice[index];
             if (result.second && index - firstCount < result.second->dice.size()) return result.second->dice[index - firstCount];
             throw std::runtime_error("History has incomplete per-die results.");
-        });
+        }, cancelled);
         const auto totalCount = firstCount + (result.second ? result.second->dice.size() : 0);
         if (used != totalCount || !SameGroup(actual.first, result.first) || actual.second.has_value() != result.second.has_value() ||
             (actual.second && !SameGroup(*actual.second, *result.second)) || actual.chosen != result.chosen || actual.finalValue != result.finalValue)
             throw std::runtime_error("History per-die details do not match its result totals.");
     }
 }
-void SaveHistoryEntry(const std::filesystem::path& root, const HistoryEntry& entry) {
+HistorySummary SummaryOf(const HistoryEntry& entry) {
+    return {entry.id, entry.created, entry.batch.request, entry.batch.results.size(), entry.saved, entry.exportedPath, entry.archived, true};
+}
+HistoryEntry ReadHistoryEntry(const std::filesystem::path& root, const std::string& id, bool archived, const CancelCheck& cancelled) {
+    CheckCancel(cancelled);
     if (root.empty()) throw std::invalid_argument("A history directory is required.");
-    ValidateHistoryEntry(entry); const auto path = EntryPath(root, entry.id); Lock lock(path);
+    const auto path = EntryPath(archived ? root / L"Archive" : root, id);
+    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (file.Get() == INVALID_HANDLE_VALUE) IoError("Could not open the selected history record");
+    auto entry = Deserialize(ReadBytes(file.Get(), MaxRecordBytes, cancelled), cancelled);
+    if (entry.id != id) throw std::runtime_error("History filename and ID do not match.");
+    entry.archived = archived;
+    if (archived && !entry.saved) throw std::runtime_error("An archived history record is not exported.");
+    return entry;
+}
+HistorySummary SaveHistoryEntry(const std::filesystem::path& root, const HistoryEntry& entry, const CancelCheck& cancelled) {
+    if (root.empty()) throw std::invalid_argument("A history directory is required.");
+    ValidateHistoryEntry(entry, cancelled);
+    if (entry.archived && !entry.saved) throw std::invalid_argument("Only exported records can be archived.");
+    const auto path = EntryPath(entry.archived ? root / L"Archive" : root, entry.id); Lock lock(path);
     Handle original(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     const bool exists = original.Get() != INVALID_HANDLE_VALUE;
     if (!exists && GetLastError() != ERROR_FILE_NOT_FOUND) IoError("Could not read existing history");
+    auto effective = SummaryOf(entry);
+    std::string previousBytes;
     if (exists) {
-        const auto previous = Deserialize(ReadBytes(original.Get(), MaxRecordBytes));
+        previousBytes = ReadBytes(original.Get(), MaxRecordBytes, cancelled);
+        const auto previous = Deserialize(previousBytes, cancelled);
         const auto count = previous.batch.results.size();
-        if (count > entry.batch.results.size() || (previous.saved && (!entry.saved || count != entry.batch.results.size())) ||
-            Serialize(previous, count, false) != Serialize(entry, count, false))
+        if (count > entry.batch.results.size() || (previous.saved && count != entry.batch.results.size()) ||
+            Serialize(previous, count, false, nullptr, cancelled) != Serialize(entry, count, false, nullptr, cancelled))
             throw std::runtime_error("A history ID cannot replace different results. Existing history was preserved.");
+        // A stale pending flag is metadata, not a result conflict. Keep the newer
+        // durable exported state instead of downgrading it or blocking all retries.
+        if (previous.saved && !entry.saved) { effective.saved = true; effective.exportedPath = previous.exportedPath; }
     }
-    const auto bytes = Serialize(entry, entry.batch.results.size(), true);
-    StagedFile target(path); Write(target.Get(), bytes); original.Close(); target.Commit(exists);
+    const auto bytes = Serialize(entry, entry.batch.results.size(), true, &effective, cancelled);
+    CheckCancel(cancelled);
+    if (exists && previousBytes == bytes) return effective;
+    StagedFile target(path); Write(target.Get(), bytes, cancelled); original.Close(); target.Commit(exists, cancelled);
+    return effective;
+}
+HistoryIndex ScanHistory(const std::filesystem::path& root, bool includeArchived, const CancelCheck& cancelled) {
+    HistoryIndex index;
+    if (root.empty()) { index.warnings.push_back(L"A history directory is required."); return index; }
+    std::set<std::string> seen;
+    const auto scan = [&](const std::filesystem::path& directory, bool archived) {
+        CheckCancel(cancelled); std::error_code error;
+        if (!std::filesystem::exists(directory, error)) {
+            if (error) index.warnings.push_back(directory.wstring() + L": could not read history folder.");
+            return;
+        }
+        std::filesystem::directory_iterator iterator(directory, error), end;
+        if (error) { index.warnings.push_back(directory.wstring() + L": could not enumerate history."); return; }
+        while (iterator != end) {
+            CheckCancel(cancelled);
+            const auto path = iterator->path();
+            if (path.extension() == L".dhist") {
+                try {
+                    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+                    if (file.Get() == INVALID_HANDLE_VALUE) IoError("Could not open history metadata");
+                    auto summary = ReadSummary(file.Get(), archived, cancelled);
+                    if (path.stem().wstring() != Wide(summary.id)) throw std::runtime_error("History filename and ID do not match.");
+                    if (!seen.insert(summary.id).second) throw std::runtime_error("Duplicate history ID in active and archived records.");
+                    index.entries.push_back(std::move(summary));
+                } catch (const Cancelled&) { throw; }
+                catch (const std::exception& ex) {
+                    std::wstring reason; try { reason = Wide(ex.what()); } catch (...) { reason = L"Unreadable metadata."; }
+                    index.warnings.push_back(path.filename().wstring() + L": " + reason + L" Original file retained.");
+                }
+            }
+            iterator.increment(error);
+            if (error) { index.warnings.push_back(directory.wstring() + L": history enumeration stopped unexpectedly."); break; }
+        }
+    };
+    scan(root, false); if (includeArchived) scan(root / L"Archive", true);
+    std::sort(index.entries.begin(), index.entries.end(), [](const HistorySummary& a, const HistorySummary& b) {
+        if (a.archived != b.archived) return !a.archived;
+        if (a.saved != b.saved) return !a.saved;
+        return a.created == b.created ? a.id < b.id : a.created > b.created;
+    });
+    return index;
+}
+HistorySummary ArchiveHistoryEntry(const std::filesystem::path& root, const std::string& id) {
+    if (root.empty()) throw std::invalid_argument("A history directory is required.");
+    const auto source = EntryPath(root, id), destination = EntryPath(root / L"Archive", id);
+    Lock sourceLock(source); Lock destinationLock(destination);
+    const auto entry = ReadHistoryEntry(root, id);
+    if (!entry.saved) throw std::invalid_argument("Export this batch successfully before archiving it.");
+    if (!MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
+        IoError("Could not archive history; the active record was preserved");
+    auto summary = SummaryOf(entry); summary.archived = true; return summary;
 }
 HistoryLoad LoadHistory(const std::filesystem::path& root) {
     HistoryLoad result; std::error_code error;
@@ -415,6 +547,19 @@ std::vector<std::size_t> QueryHistory(const std::vector<HistoryEntry>& entries, 
     }
     return matches;
 }
+std::vector<std::size_t> QueryHistoryIndex(const std::vector<HistorySummary>& entries, const HistoryQuery& query) {
+    if ((!query.dateFrom.empty() && !ValidDate(query.dateFrom)) || (!query.dateTo.empty() && !ValidDate(query.dateTo)) ||
+        (!query.dateFrom.empty() && !query.dateTo.empty() && query.dateFrom > query.dateTo))
+        throw std::invalid_argument("Use UTC dates in YYYY-MM-DD order, with the start date no later than the end date.");
+    std::vector<std::size_t> matches;
+    const auto name = Trim(query.name), notation = Trim(query.notation);
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i]; const auto date = entry.created.substr(0, 10);
+        if ((!query.unsavedOnly || !entry.saved) && Contains(entry.request.name, name) && Contains(entry.request.notation, notation) &&
+            (query.dateFrom.empty() || date >= query.dateFrom) && (query.dateTo.empty() || date <= query.dateTo)) matches.push_back(i);
+    }
+    return matches;
+}
 const std::string& HistoryCsvHeader() {
     static const std::string header = "BatchId,ResultIndex,BatchResultCount,BatchCreatedUtc,Name,DiceNotation,Mode,RequestedRolls,Modifier,PoolThreshold,TargetEnabled,TargetComparison,TargetValue,TargetMet,Roll1,Roll2,ChosenRoll,FinalResult,Timestamp,Roll1Dice,Roll1Sides,Roll1Kept,Roll2Dice,Roll2Sides,Roll2Kept";
     return header;
@@ -432,12 +577,17 @@ std::string HistoryCsvRow(const HistoryEntry& entry, std::size_t index) {
     for (const auto& field : fields) { if (!row.empty()) row += ','; row += CsvField(field); }
     return row + "\r\n";
 }
-ExportSummary ExportHistoryCsv(const std::filesystem::path& path, const std::vector<HistoryEntry>& entries, const CancelCheck& cancelled) {
+namespace {
+using EntryLoader = std::function<HistoryEntry(const HistorySummary&, const CancelCheck&)>;
+ExportSummary ExportSelected(const std::filesystem::path& path, const std::vector<HistorySummary>& entries,
+                              const EntryLoader& loader, const CancelCheck& cancelled) {
     if (entries.empty()) throw std::invalid_argument("Select at least one history batch to export.");
-    CheckCancel(cancelled); std::map<std::string, const HistoryEntry*> wanted;
+    CheckCancel(cancelled); std::map<std::string, const HistorySummary*> wanted;
     for (const auto& entry : entries) {
-        ValidateHistoryEntry(entry);
-        if (entry.batch.results.empty()) throw std::invalid_argument("A batch has no completed results to export.");
+        CheckCancel(cancelled);
+        if (!ValidId(entry.id)) throw std::invalid_argument("Invalid selected history ID.");
+        if (!entry.resultCount) throw std::invalid_argument("A batch has no completed results to export.");
+        if (!entry.localPersisted) throw std::invalid_argument("Save the selected local recovery record before exporting it.");
         if (!wanted.emplace(entry.id, &entry).second) throw std::invalid_argument("The same batch was selected more than once.");
     }
     if (path.empty() || path.filename().empty()) throw std::invalid_argument("Choose an export filename.");
@@ -455,6 +605,7 @@ ExportSummary ExportHistoryCsv(const std::filesystem::path& path, const std::vec
         if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
         if (line != HistoryCsvHeader()) throw std::runtime_error("This CSV uses an older or different format. Choose a new v3 export filename; the existing file was preserved.");
         std::string current; std::size_t expected = 0, seen = 0;
+        std::optional<HistoryEntry> loaded;
         while (lines.Next(line)) {
             CheckCancel(cancelled); const auto fields = CsvFields(line);
             if (fields.size() != 25 || !ValidId(fields[0])) throw std::runtime_error("CSV has an invalid batch record. Choose a new export file.");
@@ -467,14 +618,15 @@ ExportSummary ExportHistoryCsv(const std::filesystem::path& path, const std::vec
             if (count != expected || index != ++seen || seen > expected) throw std::runtime_error("CSV contains missing or duplicated result indices. Choose a new export file.");
             const auto found = wanted.find(current);
             if (found != wanted.end()) {
-                if (count != found->second->batch.results.size() || HistoryCsvRow(*found->second, index - 1) != line + "\r\n")
+                if (!loaded || loaded->id != current) loaded = loader(*found->second, cancelled);
+                if (count != loaded->batch.results.size() || HistoryCsvRow(*loaded, index - 1) != line + "\r\n")
                     throw std::runtime_error("This batch ID already has different or incomplete results in the CSV. Choose a new export file.");
             }
         }
         if (!current.empty()) { if (seen != expected) throw std::runtime_error("CSV contains a partial batch. Choose a new export file."); complete.insert(current); }
     }
     ExportSummary summary;
-    for (const auto& entry : entries) if (complete.count(entry.id)) ++summary.skippedBatches; else { ++summary.appendedBatches; summary.appendedResults += entry.batch.results.size(); }
+    for (const auto& entry : entries) if (complete.count(entry.id)) ++summary.skippedBatches; else ++summary.appendedBatches;
     CheckCancel(cancelled);
     if (!summary.appendedBatches) return summary;
     StagedFile target(path);
@@ -485,12 +637,32 @@ ExportSummary ExportHistoryCsv(const std::filesystem::path& path, const std::vec
         std::array<char, 65536> buffer{};
         for (;;) { CheckCancel(cancelled); DWORD read = 0; if (!ReadFile(source.Get(), buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) IoError("Could not copy export"); if (!read) break; Write(target.Get(), std::string(buffer.data(), read), cancelled); }
     } else Write(target.Get(), std::string("\xEF\xBB\xBF") + HistoryCsvHeader() + "\r\n", cancelled);
-    for (const auto& entry : entries) if (!complete.count(entry.id))
+    for (const auto& selected : entries) if (!complete.count(selected.id)) {
+        CheckCancel(cancelled); const auto entry = loader(selected, cancelled);
+        if (entry.batch.results.empty()) throw std::invalid_argument("A selected batch has no completed results.");
         for (std::size_t i = 0; i < entry.batch.results.size(); ++i) {
             CheckCancel(cancelled); const auto row = HistoryCsvRow(entry, i);
             if (row.size() > MaxCsvBytes - outputBytes) throw std::runtime_error("Combined export would exceed 512 MiB. Choose a new CSV file or fewer batches.");
             Write(target.Get(), row, cancelled); outputBytes += row.size();
         }
+        summary.appendedResults += entry.batch.results.size();
+    }
     source.Close(); target.Commit(exists, cancelled); return summary;
+}
+}
+ExportSummary ExportHistoryCsv(const std::filesystem::path& path, const std::vector<HistoryEntry>& entries, const CancelCheck& cancelled) {
+    std::vector<HistorySummary> summaries; std::map<std::string, const HistoryEntry*> sources;
+    for (const auto& entry : entries) {
+        ValidateHistoryEntry(entry, cancelled); summaries.push_back(SummaryOf(entry)); sources[entry.id] = &entry;
+    }
+    return ExportSelected(path, summaries, [&](const HistorySummary& selected, const CancelCheck& cancel) {
+        CheckCancel(cancel); return *sources.at(selected.id);
+    }, cancelled);
+}
+ExportSummary ExportHistoryCsvIds(const std::filesystem::path& path, const std::filesystem::path& root,
+    const std::vector<HistorySummary>& entries, const CancelCheck& cancelled) {
+    return ExportSelected(path, entries, [&](const HistorySummary& selected, const CancelCheck& cancel) {
+        return ReadHistoryEntry(root, selected.id, selected.archived, cancel);
+    }, cancelled);
 }
 }

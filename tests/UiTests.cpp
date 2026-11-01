@@ -79,15 +79,19 @@ void SetRoll(App& app, const wchar_t* notation = L"1d1+0", const wchar_t* times 
 void CheckVirtualLayout(App& app) {
     for (HWND child = GetWindow(app.window, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
         auto bounds = Bounds(child, app.window);
-        OffsetRect(&bounds, app.scrollX, app.scrollY);
-        const RECT content{0, 0, app.contentWidth + 1, app.contentHeight + 1};
+        RECT content{};
+        if (IsFooterControl(GetDlgCtrlID(child))) GetClientRect(app.window, &content);
+        else { OffsetRect(&bounds, app.scrollX, app.scrollY); content = {0, 0, app.contentWidth + 1, app.contentHeight + 1}; }
         CheckUi(Contains(content, bounds), "A control falls outside the scrollable content.");
     }
     const int actions[] = {IDC_ROLL, IDC_CANCEL, IDC_SAVE, IDC_DISCARD, IDC_OPEN, IDC_COPY, IDC_CLEAR};
     for (std::size_t i = 0; i < std::size(actions); ++i)
         for (std::size_t j = i + 1; j < std::size(actions); ++j) {
-            const auto first = Bounds(Control(app, actions[i]), app.window);
-            const auto second = Bounds(Control(app, actions[j]), app.window);
+            auto first = Bounds(Control(app, actions[i]), app.window);
+            auto second = Bounds(Control(app, actions[j]), app.window);
+            const RECT body{0, 0, app.contentWidth, app.bodyHeight};
+            if (!IsFooterControl(actions[i])) IntersectRect(&first, &first, &body);
+            if (!IsFooterControl(actions[j])) IntersectRect(&second, &second, &body);
             RECT overlap{};
             CheckUi(!IntersectRect(&overlap, &first, &second), "Action buttons overlap.");
         }
@@ -102,30 +106,31 @@ void UiAdvancedTests(const std::filesystem::path& base) {
     SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, BST_CHECKED, 0);
     SetWindowTextW(Control(app, IDC_TARGET_VALUE), L"4");
     StartRoll(app); WaitUi(app);
-    CheckUi(app.history.size() == 1 && app.pending && !app.history[0].saved, "First durable batch missing.");
+    CheckUi(app.history.size() == 1 && HasPending(app) && !app.history[0].saved && !app.pending && app.dirtyHistory.empty(), "First durable batch missing or full data retained unnecessarily.");
     const auto firstId = app.history[0].id;
     CheckUi(Text(Control(app, IDC_OUTPUT)).find(L"Target MET") != std::wstring::npos, "Target feedback missing from log.");
     SetRoll(app, L"8d1", L"2");
     SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, BST_CHECKED, 0);
     SetWindowTextW(Control(app, IDC_POOL_VALUE), L"1");
     StartRoll(app); WaitUi(app);
-    CheckUi(app.history.size() == 2 && app.history[0].id == firstId && app.pending, "Continuous roll lost the previous pending batch.");
+    CheckUi(app.history.size() == 2 && app.history[0].id == firstId && HasPending(app), "Continuous roll lost the previous pending batch.");
     auto restored = dice::LoadHistory(app.historyRoot);
     CheckUi(restored.entries.size() == 2 && restored.warnings.empty(), "Unsaved batches did not survive a history reload.");
-    CheckUi(app.history[1].batch.results.front().finalValue == 8, "Pool did not count per-die successes.");
-    const auto detail = ui::FullRollDetail(app.history[0], 0);
+    const auto first = dice::ReadHistoryEntry(app.historyRoot, firstId);
+    CheckUi(dice::ReadHistoryEntry(app.historyRoot, app.history[1].id).batch.results.front().finalValue == 8, "Pool did not count per-die successes.");
+    const auto detail = ui::FullRollDetail(first, 0);
     CheckUi(detail.find(L"dropped") != std::wstring::npos && detail.find(L"Target >= 4: MET") != std::wstring::npos,
         "Full history detail omitted keep/target audit information.");
-    CheckUi(ui::BatchSummary(app.history[0]).find(L"100.00%") != std::wstring::npos, "Batch target statistics are wrong.");
-    RestoreRequest(app, app.history[0].batch.request);
+    CheckUi(ui::BatchSummary(first).find(L"100.00%") != std::wstring::npos, "Batch target statistics are wrong.");
+    RestoreRequest(app, app.history[0].request);
     const auto reused = ReadRequest(app);
     CheckUi(reused.notation == L"4d1kh3+1d1" && reused.target.enabled && reused.spec.successThreshold == 0 && !Busy(app),
         "Reuse changed old results, rolled implicitly or lost rule parameters.");
     SetWindowTextW(Control(app, IDC_FILE_EDIT), (base / L"all.csv").c_str());
     SavePending(app); WaitUi(app);
-    CheckUi(!app.pending && app.history[0].saved && app.history[1].saved, "Combined export did not mark every batch.");
+    CheckUi(!HasPending(app) && app.history[0].saved && app.history[1].saved, "Combined export did not mark every batch.");
     const auto bytes = std::filesystem::file_size(base / L"all.csv");
-    app.job.StartExport(app.history, base / L"all.csv", app.historyRoot); app.saveOnly = true; WaitUi(app);
+    app.job.StartExportIds(app.history, base / L"all.csv", app.historyRoot); app.saveOnly = true; WaitUi(app);
     CheckUi(std::filesystem::file_size(base / L"all.csv") == bytes, "Retry duplicated exported batches.");
     restored = dice::LoadHistory(app.historyRoot);
     CheckUi(restored.entries.size() == 2 && restored.entries[0].saved && restored.entries[1].saved, "Saved state did not survive restart.");
@@ -146,6 +151,95 @@ void UiAdvancedTests(const std::filesystem::path& base) {
     Close(app);
     CheckUi(!IsWindow(app.window) && confirmations == 0 && dice::LoadHistory(app.historyRoot).entries.size() == 3,
         "Closing failed to preserve durable pending results without discarding.");
+}
+
+void UiInteractionTests(const std::filesystem::path& base) {
+    {
+        TestWindow test(base);
+        auto& app = test.app;
+        app.historyRoot = base / L"indexed";
+        SetRoll(app, L"1000d6", L"10000");
+        SetWindowTextW(Control(app, IDC_NAME_EDIT), L"");
+        const auto probability = ReadRules(app);
+        CheckUi(probability.times == 1 && probability.spec.count == 1000,
+            "Single-roll analysis depends on the unrelated batch name or count.");
+        bool rollRejected = false;
+        try { ReadRequest(app); } catch (const std::exception&) { rollRejected = true; }
+        CheckUi(rollRejected, "The actual roll must still validate name and batch limits.");
+        SetRoll(app, L"2d6", L"3");
+        SetWindowTextW(Control(app, IDC_PRESET), L"Named independently");
+        SetWindowTextW(Control(app, IDC_GROUP), L"A");
+        SavePreset(app);
+        CheckUi(app.settings.presets.back().name == L"Named independently", "Saving a named preset incorrectly requires a roll name.");
+        app.settings.presets.push_back({L"Second", L"d20", 1, dice::Mode::Normal, L"B"});
+        SetWindowTextW(Control(app, IDC_GROUP), L"");
+        RefreshPresets(app);
+        const auto combo = Control(app, IDC_GROUP);
+        SendMessageW(combo, CB_SETCURSEL, 0, 0);
+        // Use the combo's own keyboard handling; selection notifications rebuild
+        // only the dependent preset list, never the source group combo.
+        SendMessageW(combo, WM_KEYDOWN, VK_DOWN, 0);
+        CheckUi(SendMessageW(combo, CB_GETCURSEL, 0, 0) == 1, "First Down loses the group selection.");
+        SendMessageW(combo, WM_KEYDOWN, VK_DOWN, 0);
+        CheckUi(SendMessageW(combo, CB_GETCURSEL, 0, 0) == 2 && Text(combo) == L"B", "Repeated Down gets stuck on the empty group.");
+        CheckUi(SendMessageW(Control(app, IDC_PRESET), CB_GETCOUNT, 0, 0) == 1, "Group keyboard navigation does not filter presets.");
+        SetWindowTextW(Control(app, IDC_TARGET_VALUE), L"15");
+        SetWindowTextW(Control(app, IDC_POOL_VALUE), L"11");
+        SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, BST_UNCHECKED, 0);
+        CommitSettings(app, CaptureSettings(app));
+        CheckUi(app.settings.target.value == 15 && app.settings.successThreshold == 11 && !app.settings.poolEnabled,
+            "Disabled rule drafts were lost while another field was invalid.");
+        SetWindowTextW(Control(app, IDC_NAME_EDIT), L"roll");
+        StartRoll(app); WaitUi(app);
+        CheckUi(app.history.size() == 1 && app.dirtyHistory.empty() && !app.pending,
+            "Durable batches must retain metadata, not duplicate full dice data.");
+        const auto id = app.history.front().id;
+        app.history.clear();
+        StartHistoryScan(app);
+        CheckUi(Busy(app) && !IsWindowEnabled(Control(app, IDC_ROLL)), "Startup scanning permits concurrent rolls before the index is ready.");
+        WaitUi(app);
+        CheckUi(app.history.size() == 1 && app.history.front().id == id && HasPending(app), "Background metadata recovery lost the pending batch.");
+        // An unchanged durable history file can be read-only at shutdown: there
+        // is no reason to rewrite every pending result merely to close.
+        const auto record = app.historyRoot / (dice::Wide(id) + L".dhist");
+        CheckUi(SetFileAttributesW(record.c_str(), FILE_ATTRIBUTE_READONLY), "Could not protect the durable test record.");
+        int prompts = 0;
+        app.confirm = [&](HWND, LPCWSTR, LPCWSTR, UINT) { ++prompts; return IDNO; };
+        Close(app);
+        SetFileAttributesW(record.c_str(), FILE_ATTRIBUTE_NORMAL);
+        CheckUi(!IsWindow(app.window) && prompts == 0, "Closing rewrote an unchanged durable record.");
+    }
+    {
+        TestWindow restored(base, true);
+        CheckUi(!Checked(restored.app, IDC_POOL) && Text(Control(restored.app, IDC_POOL_VALUE)) == L"11" &&
+            !Checked(restored.app, IDC_TARGET) && Text(Control(restored.app, IDC_TARGET_VALUE)) == L"15",
+            "Disabled target/pool values did not survive restart.");
+    }
+    {
+        TestWindow test(base);
+        auto& app = test.app;
+        auto index = dice::ScanHistory(base / L"indexed");
+        auto dirty = dice::ReadHistoryEntry(base / L"indexed", index.entries.front().id);
+        dirty = dice::NewHistoryEntry(std::move(dirty.batch));
+        const auto dirtyId = dirty.id;
+        app.historyRoot = base / L"blocked-history";
+        { std::ofstream blocker(app.historyRoot); blocker << "not a directory"; }
+        app.dirtyHistory.push_back(dirty);
+        auto summary = dice::SummaryOf(dirty); summary.localPersisted = false;
+        app.history.push_back(summary);
+        int prompts = 0;
+        app.confirm = [&](HWND, LPCWSTR, LPCWSTR, UINT) { ++prompts; return IDNO; };
+        Close(app);
+        CheckUi(Busy(app) && app.flushingClose && IsWindow(app.window), "Recovery flush blocked the close handler.");
+        WaitUi(app);
+        CheckUi(IsWindow(app.window) && !app.closing && prompts == 1 && app.dirtyHistory.front().id == dirtyId,
+            "Failed close flush discarded exact results or prevented staying open.");
+        app.historyRoot = base / L"retry-history";
+        Close(app); WaitUi(app);
+        CheckUi(!IsWindow(app.window) && prompts == 1 && dice::ReadHistoryEntry(app.historyRoot, dirtyId).batch.results.size() == dirty.batch.results.size(),
+            "Close retry failed to persist the retained batch exactly once.");
+    }
 }
 
 void UiRegressionTests(const std::filesystem::path& base) {
@@ -484,3 +578,4 @@ void UiViewportTests(const std::filesystem::path& base) {
         app.settings.window.height == remembered.height, "Minimizing replaced the remembered restore state.");
     SetWindowLongPtrW(app.window, GWL_STYLE, style);
 }
+#include "MainLayoutTests.inl"

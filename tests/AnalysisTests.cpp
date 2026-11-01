@@ -136,6 +136,7 @@ void AnalysisTests() {
     Near(statistics.median, 3.5, "Statistics median failed.");
     Near(statistics.standardDeviation, std::sqrt(3.25), "Statistics standard deviation failed.");
     Near(statistics.matchedProportion, 0.5, "Statistics match proportion failed.");
+    Check(statistics.meanText == L"3.5" && statistics.medianText == L"3.5", "Statistics text disagrees with small numeric values.");
     Check(Summarize({}).count == 0, "Empty batch statistics failed.");
     Batch extremes;
     Result low, high;
@@ -143,6 +144,35 @@ void AnalysisTests() {
     high.finalValue = INT64_MAX;
     extremes.results = {low, high};
     Near(Summarize(extremes).median, -0.5, "Extreme integer median lost its fractional part.");
+    Near(Summarize(extremes).mean, -0.5, "Opposite integer extremes lost their mean.");
+    Check(Summarize(extremes).meanText == L"-0.5" && Summarize(extremes).medianText == L"-0.5", "Extreme statistic text lost its sign or fraction.");
+    for (const auto origin : {INT64_C(0), INT64_C(9000000000000000000), INT64_C(-9000000000000000000)}) {
+        Batch shifted;
+        for (std::int64_t die = 1; die <= 6; ++die) { Result value; value.finalValue = origin + die; shifted.results.push_back(value); }
+        const auto summary = Summarize(shifted);
+        Near(summary.standardDeviation, std::sqrt(35.0 / 12.0), "A large integer translation changed standard deviation.");
+        const auto expected = origin == 0 ? L"3.5" : origin > 0 ? L"9000000000000000003.5" : L"-8999999999999999996.5";
+        Check(summary.meanText == expected && summary.medianText == expected, "Large-offset statistics text rounded away integer digits.");
+    }
+    for (const auto origin : {INT64_MIN, INT64_MAX - 2}) {
+        Batch nearLimit;
+        for (std::int64_t i = 0; i < 3; ++i) { Result value; value.finalValue = origin + i; nearLimit.results.push_back(value); }
+        const auto summary = Summarize(nearLimit);
+        Near(summary.standardDeviation, std::sqrt(2.0 / 3.0), "Statistics overflowed near an integer boundary.");
+        Check(summary.meanText == std::to_wstring(origin + 1), "Integer-boundary mean text is not exact.");
+    }
+    for (const auto constant : {INT64_MIN, INT64_MAX}) {
+        Batch repeated;
+        Result value; value.finalValue = constant;
+        repeated.results.assign(10000, value);
+        const auto summary = Summarize(repeated);
+        Check(summary.meanText == std::to_wstring(constant) && summary.medianText == std::to_wstring(constant) && summary.standardDeviation == 0,
+            "Large exact integer accumulation overflowed.");
+    }
+    Batch rounding;
+    Result zero; rounding.results.assign(2000, zero);
+    rounding.results.front().finalValue = -1;
+    Check(Summarize(rounding).meanText == L"-0.001", "Exact mean decimal rounding failed.");
 
     auto request = MakeRequest(L"2d6");
     request.target = {true, Compare::AtLeast, 7};
@@ -151,6 +181,12 @@ void AnalysisTests() {
     Near(probability.mean, 7, "Exact 2d6 mean failed.");
     Near(probability.distribution.at(7), 1.0 / 6.0, "Exact 2d6 frequency failed.");
     Near(probability.matchedProportion, 21.0 / 36.0, "Exact target probability failed.");
+    auto shiftedProbability = Analyze(MakeRequest(L"1d6+9000000000000000000"));
+    Check(shiftedProbability.meanText == L"9000000000000000003.5", "Probability mean text lost a large modifier's low digits.");
+    shiftedProbability = Analyze(MakeRequest(L"1d6-9000000000000000000"));
+    Check(shiftedProbability.meanText == L"-8999999999999999996.5", "Negative probability mean text has an incorrect sign or fraction.");
+    Check(Analyze(MakeRequest(L"1d1-9223372036854775808")).meanText == L"-9223372036854775807", "Probability formatting overflowed at the negative limit.");
+    Check(Analyze(MakeRequest(L"1d1+9223372036854775806")).meanText == L"9223372036854775807", "Probability formatting overflowed at the positive limit.");
     request = MakeRequest(L"d2+d3+4");
     probability = Analyze(request);
     Near(probability.mean, 7.5, "Mixed exact mean failed.");

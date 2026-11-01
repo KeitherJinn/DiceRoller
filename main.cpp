@@ -4,6 +4,8 @@
 #include "AppSettings.h"
 #include "WindowLayout.h"
 #include "FeatureWindows.h"
+#include "SingleInstance.h"
+#include <future>
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shellapi.h>
@@ -34,29 +36,41 @@ struct App {
     bool closePrompt = false;
     bool settingsNeedBackup = false;
     bool layingOut = false;
+    bool historyLoading = false;
+    bool flushingClose = false;
+    bool closeFlushAttempted = false;
+    std::atomic<bool> cancelIndex{false};
+    std::future<dice::HistoryIndex> historyScan;
     int scrollX = 0, scrollY = 0;
     int contentWidth = 0, contentHeight = 0;
+    int bodyHeight = 0;
     int wheelRemainder = 0;
     std::filesystem::path base;
     std::filesystem::path settingsPath;
     std::filesystem::path historyRoot;
-    std::vector<dice::HistoryEntry> history;
+    std::vector<dice::HistorySummary> history;
+    std::vector<dice::HistoryEntry> dirtyHistory;
+    std::vector<dice::HistorySummary> pendingMarks;
     dice::AppSettings settings;
     std::function<int(HWND, LPCWSTR, LPCWSTR, UINT)> confirm = MessageBoxW;
     std::function<BOOL(OPENFILENAMEW*)> filePicker = GetSaveFileNameW;
     std::shared_ptr<const dice::Batch> pending;
     dice::LogBuffer log;
     dice::RollJob job;
-    ~App() { if (font) DeleteObject(font); }
+    ~App() { cancelIndex = true; if (historyScan.valid()) historyScan.wait(); if (font) DeleteObject(font); }
 };
 HWND Control(const App& app, int id) { return GetDlgItem(app.window, id); }
 bool Checked(const App& app, int id) { return SendMessageW(Control(app, id), BM_GETCHECK, 0, 0) == BST_CHECKED; }
-bool Busy(const App& app) { return app.job.State() != dice::Phase::Idle; }
+bool Busy(const App& app) { return app.historyLoading || app.job.State() != dice::Phase::Idle; }
+bool HasPending(const App& app) {
+    if (app.historyRoot.empty()) return static_cast<bool>(app.pending);
+    return std::any_of(app.history.begin(), app.history.end(), [](const auto& e) { return !e.saved && e.resultCount; });
+}
 int Px(const App& app, int value) { return MulDiv(value, static_cast<int>(app.dpi), 96); }
 void Layout(App& app);
 void EnsureFocusVisible(App& app);
 bool FinishClose(App& app);
-void RefreshPresets(App& app, const std::wstring& selected = {});
+void RefreshPresets(App& app, const std::wstring& selected = {}, bool rebuildGroups = true);
 void RestoreRequest(App& app, const dice::Request& request);
 dice::Request ReadRequest(const App& app);
 void History(App& app);
@@ -69,7 +83,11 @@ std::wstring Text(HWND control) {
     text.resize(copied);
     return text;
 }
-void Status(App& app, const std::wstring& text) { SetWindowTextW(Control(app, IDC_STATUS), text.c_str()); }
+void Status(App& app, const std::wstring& text) {
+    if (Text(Control(app, IDC_STATUS)) == text) return;
+    SetWindowTextW(Control(app, IDC_STATUS), text.c_str());
+    Layout(app);
+}
 void Error(HWND window, const std::exception& error) {
     std::wstring message;
     try { message = dice::Wide(error.what()); }
@@ -87,9 +105,9 @@ void EnableActions(App& app) {
         EnableWindow(Control(app, id), !busy);
     for (int id = IDC_QUICK_FIRST; id <= IDC_QUICK_LAST; ++id) EnableWindow(Control(app, id), !busy);
     EnableWindow(Control(app, IDC_ROLL), !busy);
-    EnableWindow(Control(app, IDC_CANCEL), busy && !app.closing);
-    EnableWindow(Control(app, IDC_SAVE), !busy && static_cast<bool>(app.pending));
-    EnableWindow(Control(app, IDC_DISCARD), !busy && !app.history.empty());
+    EnableWindow(Control(app, IDC_CANCEL), busy && !app.closing && !app.historyLoading);
+    EnableWindow(Control(app, IDC_SAVE), !busy && HasPending(app));
+    EnableWindow(Control(app, IDC_DISCARD), !busy && !app.historyRoot.empty());
     const int focus = busy ? IDC_CANCEL : IDC_ROLL;
     if (!GetFocus() || !IsChild(app.window, GetFocus()) || !IsWindowEnabled(GetFocus()))
         SetFocus(Control(app, focus));
@@ -107,105 +125,10 @@ void RefreshLog(App& app) {
         : L"Display: latest 500 entries / 120,000 characters. Older entries removed: " + std::to_wstring(app.log.Dropped())
           + L". Complete batches remain in History.";
     SetWindowTextW(Control(app, IDC_RETENTION), label.c_str());
+    Layout(app);
 }
 
-void Layout(App& app) {
-    if (app.layingOut) return;
-    app.layingOut = true;
-    RECT area{};
-    GetClientRect(app.window, &area);
-    // Show/hide scrollbars before measuring the final viewport. Keep content in
-    // physical pixels so scrollbar positions and child rectangles agree at any DPI.
-    for (int pass = 0; pass < 3; ++pass) {
-        const int width = (std::max)(560, MulDiv(area.right, 96, static_cast<int>(app.dpi)));
-        app.contentWidth = (std::max)(static_cast<int>(area.right), Px(app, width));
-        app.contentHeight = (std::max)(static_cast<int>(area.bottom), Px(app, 792));
-        app.scrollX = (std::max)(0, (std::min)(app.scrollX, app.contentWidth - static_cast<int>(area.right)));
-        app.scrollY = (std::max)(0, (std::min)(app.scrollY, app.contentHeight - static_cast<int>(area.bottom)));
-        SCROLLINFO horizontal{sizeof(horizontal), SIF_RANGE | SIF_PAGE | SIF_POS, 0,
-            app.contentWidth - 1, static_cast<UINT>(area.right), app.scrollX, 0};
-        SCROLLINFO vertical{sizeof(vertical), SIF_RANGE | SIF_PAGE | SIF_POS, 0,
-            app.contentHeight - 1, static_cast<UINT>(area.bottom), app.scrollY, 0};
-        SetScrollInfo(app.window, SB_HORZ, &horizontal, TRUE);
-        SetScrollInfo(app.window, SB_VERT, &vertical, TRUE);
-        GetClientRect(app.window, &area);
-    }
-    const int width = MulDiv(app.contentWidth, 96, static_cast<int>(app.dpi));
-    const int height = MulDiv(app.contentHeight, 96, static_cast<int>(app.dpi));
-    auto place = [&](int id, int x, int y, int w, int h) {
-        MoveWindow(Control(app, id), Px(app, x) - app.scrollX, Px(app, y) - app.scrollY,
-            Px(app, (std::max)(1, w)), Px(app, (std::max)(1, h)), FALSE);
-    };
-    auto move = [&](int id, int x, int y, int w, int h) {
-        place(id, x, y + (y >= 52 ? 36 : 0) + (y >= 272 ? 36 : 0), w, h);
-    };
-    move(IDC_PRESET_LABEL, 16, 20, 80, 24);
-    move(IDC_PRESET, 100, 16, width - 412, 240);
-    move(IDC_PRESET_APPLY, width - 304, 16, 72, 26);
-    move(IDC_PRESET_SAVE, width - 224, 16, 96, 26);
-    move(IDC_PRESET_DELETE, width - 120, 16, 104, 26);
-    place(IDC_GROUP_LABEL, 16, 56, 80, 24);
-    place(IDC_GROUP, 100, 52, width - 380, 240);
-    place(IDC_IMPORT, width - 264, 52, 116, 26);
-    place(IDC_EXPORT_PRESETS, width - 140, 52, 124, 26);
-    move(IDC_QUICK_LABEL, 16, 56, 80, 24);
-    const int quickWidth = (std::min)(64, (width - 116 - 6 * 8) / 7);
-    for (int i = 0; i < 7; ++i) move(IDC_QUICK_FIRST + i, 100 + i * (quickWidth + 8), 52, quickWidth, 26);
-    move(IDC_DICE_LABEL, 16, 92, 80, 24);
-    move(IDC_DICE_EDIT, 100, 88, width - 330, 26);
-    move(IDC_TIMES_LABEL, width - 208, 92, 70, 24);
-    move(IDC_TIMES_EDIT, width - 128, 88, 112, 26);
-    move(IDC_MODE_GROUP, 16, 124, width - 32, 56);
-    move(IDC_RAD_NORMAL, 32, 144, 120, 24);
-    move(IDC_RAD_ADV, 170, 144, 150, 24);
-    move(IDC_RAD_DISADV, 336, 144, 180, 24);
-    move(IDC_RULES, 16, 188, width - 32, 40);
-    move(IDC_NAME_LABEL, 16, 240, 80, 24);
-    move(IDC_NAME_EDIT, 100, 236, width - 116, 26);
-    place(IDC_TARGET, 16, 308, 76, 26);
-    place(IDC_COMPARISON, 92, 308, 64, 160);
-    place(IDC_TARGET_VALUE, 164, 308, 108, 26);
-    place(IDC_POOL, 288, 308, 164, 26);
-    place(IDC_POOL_VALUE, 460, 308, width - 476, 26);
-    move(IDC_TIMESTAMP, 16, 272, 200, 24);
-    move(IDC_AUTOSAVE, 232, 272, width - 248, 24);
-    move(IDC_FILE_LABEL, 16, 312, 80, 24);
-    move(IDC_FILE_EDIT, 100, 308, width - 224, 26);
-    move(IDC_BROWSE, width - 108, 308, 92, 26);
-    move(IDC_ROLL, 16, 348, 88, 28);
-    move(IDC_CANCEL, 112, 348, 88, 28);
-    move(IDC_SAVE, 208, 348, 104, 28);
-    move(IDC_DISCARD, 320, 348, 104, 28);
-    const int extra = 36;
-    move(IDC_PROBABILITY, 16, 348 + extra, 164, 28);
-    move(IDC_OPEN, width - 308, 348 + extra, 92, 28);
-    move(IDC_COPY, width - 208, 348 + extra, 92, 28);
-    move(IDC_CLEAR, width - 108, 348 + extra, 92, 28);
-    move(IDC_PROGRESS, 16, 386 + extra, width - 32, 16);
-    move(IDC_STATUS, 16, 412 + extra, width - 32, 40);
-    move(IDC_OUTPUT_LABEL, 16, 458 + extra, width - 32, 22);
-    move(IDC_OUTPUT, 16, 484 + extra, width - 32, height - 606 - extra);
-    place(IDC_RETENTION, 16, height - 42, width - 32, 36);
-    app.layingOut = false;
-    // Group boxes and radio buttons are siblings. Repaint the complete final
-    // arrangement once; immediate per-control paints leave stale overlaps when scrolling.
-    RedrawWindow(app.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
-}
-
-void EnsureFocusVisible(App& app) {
-    const auto focus = GetFocus();
-    if (!focus || !IsChild(app.window, focus)) return;
-    RECT bounds{}, client{};
-    GetWindowRect(focus, &bounds);
-    MapWindowPoints(nullptr, app.window, reinterpret_cast<POINT*>(&bounds), 2);
-    GetClientRect(app.window, &client);
-    const int oldX = app.scrollX, oldY = app.scrollY;
-    if (bounds.top < 0) app.scrollY += bounds.top;
-    else if (bounds.bottom > client.bottom) app.scrollY += (std::min)(bounds.top, bounds.bottom - client.bottom);
-    if (bounds.left < 0) app.scrollX += bounds.left;
-    else if (bounds.right > client.right) app.scrollX += (std::min)(bounds.left, bounds.right - client.right);
-    if (oldX != app.scrollX || oldY != app.scrollY) Layout(app);
-}
+#include "MainLayout.inl"
 
 void Scroll(App& app, int bar, UINT action) {
     SCROLLINFO info{sizeof(info), SIF_ALL};
@@ -292,8 +215,8 @@ void Setup(App& app) {
     SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, app.settings.target.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(add(IDC_TARGET_VALUE, L"EDIT", std::to_wstring(app.settings.target.value).c_str(), edit, WS_EX_CLIENTEDGE), EM_LIMITTEXT, 20, 0);
     add(IDC_POOL, L"BUTTON", L"Pool: each die >=", BS_AUTOCHECKBOX | WS_TABSTOP);
-    SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, app.settings.successThreshold ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(add(IDC_POOL_VALUE, L"EDIT", std::to_wstring(app.settings.successThreshold ? app.settings.successThreshold : 8).c_str(), edit | ES_NUMBER, WS_EX_CLIENTEDGE), EM_LIMITTEXT, 10, 0);
+    SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, app.settings.poolEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(add(IDC_POOL_VALUE, L"EDIT", std::to_wstring(app.settings.successThreshold).c_str(), edit | ES_NUMBER, WS_EX_CLIENTEDGE), EM_LIMITTEXT, 10, 0);
     add(IDC_TIMESTAMP, L"BUTTON", L"Timestamp on new results", BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP);
     SendMessageW(Control(app, IDC_TIMESTAMP), BM_SETCHECK, app.settings.showTimestamp ? BST_CHECKED : BST_UNCHECKED, 0);
     add(IDC_AUTOSAVE, L"BUTTON", L"Automatically append to CSV", BS_AUTOCHECKBOX | WS_TABSTOP);
@@ -311,7 +234,8 @@ void Setup(App& app) {
     add(IDC_COPY, L"BUTTON", L"&Copy log", button);
     add(IDC_CLEAR, L"BUTTON", L"C&lear log", button);
     add(IDC_PROGRESS, PROGRESS_CLASSW, L"", PBS_SMOOTH);
-    add(IDC_STATUS, L"STATIC", L"Ready. Batches are kept locally; export status is tracked separately.", SS_NOPREFIX);
+    add(IDC_STATUS, L"EDIT", L"Ready. Batches are kept locally; export status is tracked separately.",
+        WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY);
     add(IDC_OUTPUT_LABEL, L"STATIC", L"Recent results (complete records: History):", 0);
     add(IDC_OUTPUT, L"EDIT", L"", WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY, WS_EX_CLIENTEDGE);
     SendMessageW(Control(app, IDC_OUTPUT), EM_LIMITTEXT, dice::LogBuffer::MaxCharacters, 0);
@@ -344,12 +268,12 @@ std::int64_t ReadInteger(const std::wstring& input, const char* description) {
     } catch (const std::exception&) {}
     throw std::invalid_argument(description);
 }
-dice::Request ReadRequest(const App& app) {
+dice::Request ReadRules(const App& app) {
     dice::Request request;
-    request.name = dice::Trim(Text(Control(app, IDC_NAME_EDIT)));
+    request.name = L"Probability";
     request.notation = dice::Trim(Text(Control(app, IDC_DICE_EDIT)));
     request.spec = dice::Parse(request.notation);
-    request.times = dice::ParseTimes(Text(Control(app, IDC_TIMES_EDIT)));
+    request.times = 1;
     request.mode = CurrentMode(app);
     request.showTimestamp = Checked(app, IDC_TIMESTAMP);
     request.target.enabled = Checked(app, IDC_TARGET);
@@ -364,6 +288,13 @@ dice::Request ReadRequest(const App& app) {
     dice::Validate(request);
     return request;
 }
+dice::Request ReadRequest(const App& app) {
+    auto request = ReadRules(app);
+    request.name = dice::Trim(Text(Control(app, IDC_NAME_EDIT)));
+    request.times = dice::ParseTimes(Text(Control(app, IDC_TIMES_EDIT)));
+    dice::Validate(request);
+    return request;
+}
 void RestoreRequest(App& app, const dice::Request& request) {
     SetWindowTextW(Control(app, IDC_DICE_EDIT), request.notation.c_str());
     SetWindowTextW(Control(app, IDC_TIMES_EDIT), std::to_wstring(request.times).c_str());
@@ -371,9 +302,9 @@ void RestoreRequest(App& app, const dice::Request& request) {
     CheckRadioButton(app.window, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_NORMAL + static_cast<int>(request.mode));
     SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, request.target.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Control(app, IDC_COMPARISON), CB_SETCURSEL, static_cast<int>(request.target.comparison), 0);
-    SetWindowTextW(Control(app, IDC_TARGET_VALUE), std::to_wstring(request.target.value).c_str());
+    if (request.target.enabled) SetWindowTextW(Control(app, IDC_TARGET_VALUE), std::to_wstring(request.target.value).c_str());
     SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, request.spec.successThreshold ? BST_CHECKED : BST_UNCHECKED, 0);
-    SetWindowTextW(Control(app, IDC_POOL_VALUE), std::to_wstring(request.spec.successThreshold ? request.spec.successThreshold : 8).c_str());
+    if (request.spec.successThreshold) SetWindowTextW(Control(app, IDC_POOL_VALUE), std::to_wstring(request.spec.successThreshold).c_str());
 }
 
 void RememberWindow(App& app) {
@@ -399,9 +330,24 @@ dice::AppSettings CaptureSettings(App& app) {
         settings.notation = request.notation;
         settings.times = request.times;
         settings.mode = request.mode;
-        settings.successThreshold = request.spec.successThreshold;
-        settings.target = request.target;
+        settings.poolEnabled = request.spec.successThreshold != 0;
+        if (request.spec.successThreshold) settings.successThreshold = request.spec.successThreshold;
+        if (request.target.enabled) settings.target = request.target;
     } catch (const std::exception&) { /* Keep the last valid roll configuration. */ }
+    // Even if another field is unfinished, switching a rule off is safe and
+    // its valid draft should survive restarting the application.
+    if (!Checked(app, IDC_TARGET)) {
+        settings.target.enabled = false;
+        settings.target.comparison = static_cast<dice::Compare>(SendMessageW(Control(app, IDC_COMPARISON), CB_GETCURSEL, 0, 0));
+        try { settings.target.value = ReadInteger(Text(Control(app, IDC_TARGET_VALUE)), "Invalid target."); } catch (const std::exception&) {}
+    }
+    if (!Checked(app, IDC_POOL)) {
+        settings.poolEnabled = false;
+        try {
+            const auto threshold = ReadInteger(Text(Control(app, IDC_POOL_VALUE)), "Invalid threshold.");
+            if (threshold >= 1 && threshold <= INT_MAX) settings.successThreshold = static_cast<int>(threshold);
+        } catch (const std::exception&) {}
+    }
     const auto path = Text(Control(app, IDC_FILE_EDIT));
     try { settings.csvPath = path.empty() ? L"" : dice::ResolvePath(path, app.base).wstring(); }
     catch (const std::exception&) { /* Keep the last valid destination. */ }
@@ -421,20 +367,26 @@ void CommitSettings(App& app, dice::AppSettings settings) {
     app.settings = std::move(settings);
 }
 
-void RefreshPresets(App& app, const std::wstring& selected) {
+void RefreshPresets(App& app, const std::wstring& selected, bool rebuildGroups) {
     const auto combo = Control(app, IDC_PRESET);
     const auto group = dice::Trim(Text(Control(app, IDC_GROUP)));
     const auto groups = Control(app, IDC_GROUP);
-    SendMessageW(groups, CB_RESETCONTENT, 0, 0);
-    SendMessageW(groups, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L""));
+    if (rebuildGroups) {
+        SendMessageW(groups, CB_RESETCONTENT, 0, 0);
+        SendMessageW(groups, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L""));
+    }
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     for (const auto& preset : app.settings.presets) {
-        if (SendMessageW(groups, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(preset.group.c_str())) == CB_ERR)
+        if (rebuildGroups && SendMessageW(groups, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(preset.group.c_str())) == CB_ERR)
             SendMessageW(groups, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.group.c_str()));
         if (group.empty() || CompareStringOrdinal(group.c_str(), -1, preset.group.c_str(), -1, TRUE) == CSTR_EQUAL)
             SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.name.c_str()));
     }
-    SetWindowTextW(groups, group.c_str());
+    if (rebuildGroups) {
+        const auto index = SendMessageW(groups, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(group.c_str()));
+        if (index != CB_ERR) SendMessageW(groups, CB_SETCURSEL, index, 0);
+        else SetWindowTextW(groups, group.c_str());
+    }
     SetWindowTextW(combo, selected.c_str());
 }
 
@@ -467,7 +419,10 @@ void SavePreset(App& app) {
     if (Busy(app)) return;
     dice::Preset preset{dice::Trim(Text(Control(app, IDC_PRESET))),
         dice::Trim(Text(Control(app, IDC_DICE_EDIT))), dice::ParseTimes(Text(Control(app, IDC_TIMES_EDIT))), CurrentMode(app)};
-    const auto request = ReadRequest(app);
+    auto request = ReadRules(app);
+    request.name = preset.name;
+    request.times = preset.times;
+    dice::Validate(request);
     preset.group = dice::Trim(Text(Control(app, IDC_GROUP)));
     preset.successThreshold = request.spec.successThreshold;
     preset.target = request.target;
@@ -525,20 +480,69 @@ void StartRoll(App& app) {
 }
 
 void SavePending(App& app) {
-    if (Busy(app) || !app.pending) return;
+    if (Busy(app) || !HasPending(app)) return;
     const auto path = OutputPath(app);
     if (app.historyRoot.empty()) app.job.StartSave(app.pending, path);
     else {
-        std::vector<dice::HistoryEntry> entries;
-        for (const auto& entry : app.history) if (!entry.saved && !entry.batch.results.empty()) entries.push_back(entry);
-        app.job.StartExport(std::move(entries), path, app.historyRoot);
+        std::vector<dice::HistorySummary> entries;
+        for (const auto& entry : app.history) if (!entry.saved && entry.resultCount) entries.push_back(entry);
+        app.job.StartExportIds(std::move(entries), path, app.historyRoot, app.dirtyHistory);
     }
     app.saveOnly = true;
     Status(app, L"Saving retained results...");
     EnableActions(app);
 }
 
+template<class T> void MergeById(std::vector<T>& entries, T entry) {
+    auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.id == entry.id; });
+    if (found == entries.end()) entries.push_back(std::move(entry));
+    else *found = std::move(entry);
+}
+void CollectOutcome(App& app, dice::Outcome& outcome) {
+    for (const auto& id : outcome.persistedIds) {
+        app.dirtyHistory.erase(std::remove_if(app.dirtyHistory.begin(), app.dirtyHistory.end(),
+            [&](const auto& e) { return e.id == id; }), app.dirtyHistory.end());
+        app.pendingMarks.erase(std::remove_if(app.pendingMarks.begin(), app.pendingMarks.end(),
+            [&](const auto& e) { return e.id == id; }), app.pendingMarks.end());
+    }
+    for (auto& entry : outcome.summaries) if (!entry.archived) MergeById(app.history, entry);
+    for (auto& entry : outcome.dirtyEntries) {
+        auto summary = dice::SummaryOf(entry); summary.localPersisted = false;
+        MergeById(app.history, std::move(summary));
+        MergeById(app.dirtyHistory, std::move(entry));
+    }
+    for (auto& mark : outcome.pendingMarks) {
+        if (!mark.archived) MergeById(app.history, mark);
+        MergeById(app.pendingMarks, std::move(mark));
+    }
+}
+void StartHistoryScan(App& app) {
+    app.cancelIndex = false;
+    app.historyScan = std::async(std::launch::async, [&app] {
+        return dice::ScanHistory(app.historyRoot, false, [&app] { return app.cancelIndex.load(); });
+    });
+    app.historyLoading = true;
+    EnableActions(app);
+    Status(app, L"Loading the history index...");
+}
 void Poll(App& app) {
+    if (app.historyLoading) {
+        if (app.historyScan.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        app.historyLoading = false;
+        try {
+            auto index = app.historyScan.get();
+            app.history = std::move(index.entries);
+            for (const auto& warning : index.warnings) app.log.Add(warning + L"\r\n");
+            RefreshLog(app);
+            Status(app, !index.warnings.empty() ? L"History index loaded with warnings. Original files were kept; see the log."
+                : HasPending(app) ? L"Recovered unexported batches. Open History to inspect or export; you can roll again."
+                : L"Ready. History details load when selected.");
+        } catch (const std::exception& error) {
+            if (!app.closing) { app.log.Add(dice::Wide(error.what()) + L"\r\n"); RefreshLog(app); Status(app, L"History scan failed; open History and Reload to retry."); }
+        }
+        if (app.closing) { FinishClose(app); return; }
+        EnableActions(app);
+    }
     if (!Busy(app)) return;
     const auto phase = app.job.State();
     if (phase != dice::Phase::Finished) {
@@ -547,25 +551,17 @@ void Poll(App& app) {
             SendMessageW(Control(app, IDC_PROGRESS), PBM_SETPOS, count, 0);
             Status(app, (app.closing ? L"Cancelling and closing... " : L"Rolling: ") +
                 std::to_wstring(count) + L" / " + std::to_wstring(app.requested));
-        } else Status(app, app.closing ? L"Waiting for the save to stop safely..." : L"Saving CSV... Results remain in memory until saving succeeds.");
+        } else Status(app, app.closing ? L"Keeping recovery data before closing..." : L"Saving CSV... You can cancel before the file is committed.");
         return;
     }
     auto outcome = app.job.Take();
     std::size_t count = outcome.batch ? outcome.batch->results.size() : 0;
-    if (!outcome.batch) for (const auto& entry : outcome.entries) count += entry.batch.results.size();
+    if (!outcome.batch) for (const auto& entry : outcome.summaries) count += entry.resultCount;
     // Retain results before display allocation, so display errors cannot lose the batch.
-    app.pending = !outcome.saved && count ? outcome.batch : nullptr;
-    for (auto& entry : outcome.entries) {
-        auto old = std::find_if(app.history.begin(), app.history.end(), [&](const auto& e) { return e.id == entry.id; });
-        if (old == app.history.end()) app.history.push_back(std::move(entry));
-        else *old = std::move(entry);
-    }
-    if (!app.historyRoot.empty() && !app.history.empty()) {
-        app.pending.reset();
-        for (auto it = app.history.rbegin(); it != app.history.rend(); ++it)
-            if (!it->saved && !it->batch.results.empty()) { app.pending = std::make_shared<dice::Batch>(it->batch); break; }
-    }
-    if (app.closing && FinishClose(app)) return;
+    if (app.historyRoot.empty()) app.pending = !outcome.saved && count ? outcome.batch : nullptr;
+    CollectOutcome(app, outcome);
+    if (app.flushingClose) app.flushingClose = false;
+    if (app.closing) { FinishClose(app); return; }
     EnableActions(app);
     if (!app.saveOnly && outcome.batch) {
         app.log.Add(L"--- " + outcome.batch->request.name + L": " + std::to_wstring(count) + L" completed roll(s) ---\r\n");
@@ -575,6 +571,7 @@ void Poll(App& app) {
     }
     std::wstring message;
     if (outcome.saved) message = L"Saved " + std::to_wstring(count) + L" roll(s) to: " + outcome.path.wstring();
+    else if (outcome.csvCommitted) message = L"CSV export completed. Its local status still needs to be saved; closing will retry. Destination: " + outcome.path.wstring();
     else {
         message = outcome.cancelled ? L"Cancelled. " : outcome.error.empty() ? L"Completed. " : L"Operation failed. ";
         message += std::to_wstring(count) + L" roll(s) retained; ";
@@ -589,18 +586,29 @@ void Poll(App& app) {
 
 void History(App& app) {
     if (Busy(app)) return;
-    const auto selection = ui::ShowHistory(app.window, app.history);
-    if (selection.indices.empty()) return;
-    if (selection.action == ui::HistorySelection::Action::Reuse) {
-        RestoreRequest(app, app.history.at(selection.indices.front()).batch.request);
+    std::filesystem::path exportPath;
+    auto selection = ui::ShowHistory(app.window, app.historyRoot, app.history, app.dirtyHistory,
+        [&] { exportPath = OutputPath(app); }, app.pendingMarks);
+    if (selection.indexChanged) {
+        app.history.clear();
+        for (auto& entry : selection.index) if (!entry.archived) app.history.push_back(std::move(entry));
+        for (const auto& entry : app.dirtyHistory) {
+            auto summary = dice::SummaryOf(entry); summary.localPersisted = false;
+            MergeById(app.history, std::move(summary));
+        }
+        for (const auto& mark : app.pendingMarks) if (!mark.archived) MergeById(app.history, mark);
+        EnableActions(app);
+    }
+    if (selection.action == ui::HistorySelection::Action::Reuse && selection.request) {
+        RestoreRequest(app, *selection.request);
         Status(app, L"Historical parameters loaded. Select Roll to generate NEW random results.");
         SetFocus(Control(app, IDC_DICE_EDIT));
         EnsureFocusVisible(app);
-    } else if (selection.action == ui::HistorySelection::Action::Export) {
-        const auto path = OutputPath(app);
-        std::vector<dice::HistoryEntry> entries;
-        for (auto index : selection.indices) entries.push_back(app.history.at(index));
-        app.job.StartExport(std::move(entries), path, app.historyRoot);
+    } else if (selection.action == ui::HistorySelection::Action::Export && !selection.selected.empty()) {
+        std::vector<dice::HistoryEntry> dirty;
+        for (const auto& entry : app.dirtyHistory)
+            if (std::any_of(selection.selected.begin(), selection.selected.end(), [&](const auto& e) { return e.id == entry.id; })) dirty.push_back(entry);
+        app.job.StartExportIds(std::move(selection.selected), exportPath, app.historyRoot, std::move(dirty));
         app.saveOnly = true;
         EnableActions(app);
         Status(app, L"Exporting selected batches...");
@@ -712,14 +720,23 @@ INT_PTR CALLBACK About(HWND dialog, UINT msg, WPARAM wParam, LPARAM) {
     return FALSE;
 }
 bool FinishClose(App& app) {
-    if (!app.historyRoot.empty()) {
-        try {
-            for (const auto& entry : app.history) if (!entry.saved) dice::SaveHistoryEntry(app.historyRoot, entry);
-        } catch (const std::exception& error) {
-            const auto message = L"Some results could not be kept for recovery.\n" + dice::Wide(error.what()) +
-                L"\n\nClose anyway? Results not written to disk may be lost.";
-            if (app.confirm(app.window, message.c_str(), L"Local history", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
-                app.closing = false; EnableActions(app); return false;
+    if (!app.historyRoot.empty() && (!app.dirtyHistory.empty() || !app.pendingMarks.empty())) {
+        if (!app.closeFlushAttempted) {
+            try { app.job.StartFlushDirty(app.dirtyHistory, app.historyRoot, app.pendingMarks); }
+            catch (...) { app.closing = false; throw; }
+            app.closeFlushAttempted = true;
+            app.flushingClose = true;
+            app.saveOnly = true;
+            EnableActions(app);
+            Status(app, L"Keeping recovery data before closing...");
+            return false;
+        }
+        {
+            const auto message = app.dirtyHistory.empty()
+                ? L"CSV export succeeded, but its local status could not be saved.\n\nClose anyway? On reopening, these batches may appear unexported. Exporting to the same CSV will not duplicate them."
+                : L"Some results could not be kept for recovery.\n\nClose anyway? Results not written to disk may be lost.";
+            if (app.confirm(app.window, message, L"Local history", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
+                app.closing = false; app.closeFlushAttempted = false; EnableActions(app); return false;
             }
         }
     }
@@ -731,6 +748,7 @@ bool FinishClose(App& app) {
             L"\n\nClose anyway and keep the previously saved settings?";
         if (app.confirm(app.window, message.c_str(), L"Save settings", MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING) != IDYES) {
             app.closing = false;
+            app.closeFlushAttempted = false;
             EnableActions(app);
             return false;
         }
@@ -745,6 +763,12 @@ void Close(App& app) {
         explicit PromptGuard(bool& flag) : active(flag) { active = true; }
         ~PromptGuard() { active = false; }
     } prompt(app.closePrompt);
+    if (app.historyLoading) {
+        app.closing = true;
+        app.cancelIndex = true;
+        EnableActions(app);
+        return;
+    }
     if (Busy(app)) {
         if (app.confirm(app.window, L"Cancel the operation and close? Completed rolls will be kept in local history.",
             L"Close Dice Roller", MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES) return;
@@ -771,6 +795,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
             SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
         }
         if (!app) return DefWindowProcW(window, msg, wParam, lParam);
+        if (msg == ui::ActivationMessage()) {
+            if (IsIconic(window)) ShowWindow(window, SW_RESTORE);
+            HWND active = GetLastActivePopup(window);
+            if (!IsWindowVisible(active)) active = window;
+            SetForegroundWindow(active);
+            return 0;
+        }
         switch (msg) {
         case WM_CREATE: Setup(*app); return 0;
         case WM_SIZE:
@@ -821,10 +852,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
                 wchar_t group[128]{};
                 if (selected != CB_ERR) SendMessageW(Control(*app, IDC_GROUP), CB_GETLBTEXT, selected, reinterpret_cast<LPARAM>(group));
                 SetWindowTextW(Control(*app, IDC_GROUP), group);
-                RefreshPresets(*app); return 0;
+                RefreshPresets(*app, {}, false); return 0;
             }
             if (id == IDC_GROUP && HIWORD(wParam) == CBN_KILLFOCUS) {
-                RefreshPresets(*app, Text(Control(*app, IDC_PRESET))); return 0;
+                RefreshPresets(*app, Text(Control(*app, IDC_PRESET)), false); return 0;
             }
             if (id == IDC_OUTPUT && (HIWORD(wParam) == EN_MAXTEXT || HIWORD(wParam) == EN_ERRSPACE)) {
                 app->logFailed = true;
@@ -840,7 +871,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
             case IDC_PRESET_SAVE: SavePreset(*app); break;
             case IDC_PRESET_DELETE: DeletePreset(*app); break;
             case IDC_DISCARD: History(*app); break;
-            case IDC_PROBABILITY: if (!Busy(*app)) ui::ShowProbability(window, ReadRequest(*app)); break;
+            case IDC_PROBABILITY: if (!Busy(*app)) ui::ShowProbability(window, ReadRules(*app)); break;
             case IDC_IMPORT: ExchangePresets(*app, true); break;
             case IDC_EXPORT_PRESETS: ExchangePresets(*app, false); break;
             case IDC_BROWSE: Browse(*app); break;
@@ -869,6 +900,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     try {
+        ui::SingleInstance instanceGuard;
+        if (!instanceGuard.IsPrimary()) {
+            if (!ui::ActivateExistingInstance()) MessageBoxW(nullptr,
+                L"Dice Roller is already running for this Windows user. Check your other desktop or session.",
+                L"Dice Roller", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS};
         if (!InitCommonControlsEx(&controls)) throw std::runtime_error("Could not initialize Windows controls.");
         App app;
@@ -881,10 +919,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         // Preserve legacy files; the new export format needs batch IDs and rule details.
         if (app.settings.csvPath == (app.base / L"dice_results_v2.csv").wstring())
             app.settings.csvPath = (app.base / L"dice_results_v3.csv").wstring();
-        const auto history = dice::LoadHistory(app.historyRoot);
-        app.history = history.entries;
-        for (auto it = app.history.rbegin(); it != app.history.rend(); ++it)
-            if (!it->saved && !it->batch.results.empty()) { app.pending = std::make_shared<dice::Batch>(it->batch); break; }
         const auto placement = app.settings.window;
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
@@ -918,11 +952,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         ShowWindow(window, placement.maximized && show != SW_SHOWMINIMIZED ? SW_SHOWMAXIMIZED : show);
         UpdateWindow(window);
         if (!loaded.warning.empty()) Status(app, loaded.warning);
-        if (!history.warnings.empty()) {
-            std::wstring warnings = L"Some history files could not be loaded. Original files were kept.\r\n";
-            for (const auto& warning : history.warnings) warnings += warning + L"\r\n";
-            app.log.Add(warnings); RefreshLog(app); Status(app, L"History loaded with warnings. See the recent-results log.");
-        } else if (app.pending) Status(app, L"Recovered unexported batches. Open History to inspect or export them; you can roll again.");
+        if (!loaded.warning.empty()) { app.log.Add(loaded.warning + L"\r\n"); RefreshLog(app); }
+        StartHistoryScan(app);
         MSG msg{};
         int status = 0;
         while ((status = GetMessageW(&msg, nullptr, 0, 0)) > 0) {

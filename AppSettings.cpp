@@ -8,7 +8,7 @@
 namespace dice {
 namespace {
 constexpr std::array<char, 8> Magic{ 'D', 'R', 'S', 'E', 'T', 'T', 'I', 'N' };
-constexpr std::uint32_t FormatVersion = 2;
+constexpr std::uint32_t FormatVersion = 3;
 constexpr std::size_t MaxFileBytes = 256 * 1024;
 constexpr std::size_t MaxNotation = 1024;
 constexpr std::size_t MaxCsvPath = 32760;
@@ -130,7 +130,7 @@ public:
             throw std::runtime_error("Settings have an invalid header.");
         offset_ += Magic.size();
         const auto version = U32();
-        if (version != 1 && version != FormatVersion)
+        if (version < 1 || version > FormatVersion)
             throw std::runtime_error("Settings use an unsupported format version.");
         return version;
     }
@@ -175,6 +175,8 @@ std::string Serialize(const AppSettings& settings) {
         String(bytes, preset.group);
         Rules(bytes, preset.successThreshold, preset.target);
     }
+    // Version 3 separates the remembered threshold from its enabled state.
+    U32(bytes, settings.poolEnabled ? 1 : 0);
     if (bytes.size() > MaxFileBytes) throw std::length_error("Settings exceed the supported file size.");
     return bytes;
 }
@@ -215,6 +217,12 @@ AppSettings Deserialize(const std::string& bytes) {
             preset.target = input.ReadTarget();
         }
     }
+    if (version >= 3) result.poolEnabled = input.Boolean();
+    else if (version == 2) {
+        if (result.successThreshold < 0) throw std::runtime_error("Settings contain an invalid pool threshold.");
+        result.poolEnabled = result.successThreshold > 0;
+        if (!result.poolEnabled) result.successThreshold = 8;
+    }
     input.End();
     ValidateSettings(result);
     return result;
@@ -239,7 +247,9 @@ void ValidatePreset(const Preset& preset) {
 
 void ValidateSettings(const AppSettings& settings) {
     OneLine(settings.name, 128, false, "Roll name");
-    ValidateNotation(settings.notation, settings.times, settings.mode, settings.successThreshold, settings.target);
+    if (settings.successThreshold < 1) throw std::invalid_argument("The remembered pool threshold must be positive.");
+    ValidateNotation(settings.notation, settings.times, settings.mode,
+        settings.poolEnabled ? settings.successThreshold : 0, settings.target);
     OneLine(settings.csvPath, MaxCsvPath, true, "CSV path");
     if (!settings.csvPath.empty()) ResolvePath(settings.csvPath, std::filesystem::path(L"C:\\"));
     const auto& window = settings.window;

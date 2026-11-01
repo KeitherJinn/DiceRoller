@@ -2,6 +2,7 @@
 #include "ResultStore.h"
 #include <windows.h>
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 
@@ -159,7 +160,9 @@ void HistoryTests() {
         "Retry after CSV commit but before history marking must not duplicate results.");
     entry.saved = true; entry.exportedPath = csv.wstring(); SaveHistoryEntry(root, entry);
     changed = entry; changed.saved = false; changed.exportedPath.clear();
-    Throws([&] { SaveHistoryEntry(root, changed); });
+    const auto mergedState = SaveHistoryEntry(root, changed);
+    Require(mergedState.saved && mergedState.exportedPath == csv.wstring(),
+        "An unchanged stale pending snapshot must preserve the newer exported state.");
     loaded = LoadHistory(root); query = {}; query.unsavedOnly = true;
     const auto unsaved = QueryHistory(loaded.entries, query);
     Require(unsaved.size() == 1 && loaded.entries[unsaved[0]].id == second.id,
@@ -205,4 +208,71 @@ void HistoryTests() {
     NoTemporaryFiles(temporary.root);
     Throws([&] { ExportHistoryCsv(csv, {NewHistoryEntry(Fixture(0))}); });
     Throws([&] { ExportHistoryCsv(csv, {third, third}); });
+
+    const auto lightweight = ScanHistory(root);
+    Require(lightweight.warnings.empty() && lightweight.entries.size() == 2 &&
+        lightweight.entries.front().id == second.id && !lightweight.entries.front().saved,
+        "The lightweight index must prioritize pending records without loading dice data.");
+    HistoryQuery pendingQuery; pendingQuery.unsavedOnly = true;
+    Require(QueryHistoryIndex(lightweight.entries, pendingQuery).size() == 1, "Index filtering lost pending history.");
+    const auto onDemand = ReadHistoryEntry(root, entry.id);
+    Require(HistoryCsvRow(onDemand, 0) == HistoryCsvRow(entry, 0), "On-demand history reading changed stored results.");
+    Throws([&] { ArchiveHistoryEntry(root, second.id); });
+    const auto archiveSummary = ArchiveHistoryEntry(root, entry.id);
+    Require(archiveSummary.archived && archiveSummary.saved && !fs::exists(RecordPath(root, entry)) &&
+        fs::exists(root / L"Archive" / (Wide(entry.id) + L".dhist")), "Archiving must atomically move an exported record.");
+    Require(ScanHistory(root).entries.size() == 1 && ScanHistory(root, true).entries.size() == 2,
+        "Archived records must remain accessible without filling the active index.");
+    const auto archivedEntry = ReadHistoryEntry(root, entry.id, true);
+    Require(archivedEntry.archived && HistoryCsvRow(archivedEntry, 0) == HistoryCsvRow(entry, 0),
+        "Archived dice details failed to round-trip.");
+    const auto archivedCsv = temporary.root / L"archived.csv";
+    Require(ExportHistoryCsvIds(archivedCsv, root, {archiveSummary}).appendedResults == entry.batch.results.size(),
+        "Archived records must support the bounded ID-based export path.");
+    const auto archivedBytes = Read(root / L"Archive" / (Wide(entry.id) + L".dhist"));
+    Put(RecordPath(root, entry), archivedBytes);
+    Throws([&] { ArchiveHistoryEntry(root, entry.id); });
+    Require(Read(RecordPath(root, entry)) == archivedBytes, "An archive filename conflict must preserve the active record.");
+
+    bool scanCancelled = false;
+    try { ScanHistory(root, true, [] { return true; }); } catch (const Cancelled&) { scanCancelled = true; }
+    Require(scanCancelled, "History indexing must observe cancellation before scanning files.");
+    bool readCancelled = false;
+    try { ReadHistoryEntry(root, entry.id, true, [] { return true; }); } catch (const Cancelled&) { readCancelled = true; }
+    Require(readCancelled, "On-demand history reads must support cancellation.");
+    bool exportCancelled = false;
+    try { ExportHistoryCsvIds(archivedCsv, root, {archiveSummary}, [] { return true; }); } catch (const Cancelled&) { exportCancelled = true; }
+    Require(exportCancelled, "ID-based export must observe cancellation before writing.");
+
+    // The count limit is removed from the index, including records beyond the
+    // former 10,000-file cutoff. Reuse valid record bytes with unique v1 IDs.
+    const auto manyRoot = temporary.root / L"Many"; fs::create_directory(manyRoot);
+    auto smallEntry = NewHistoryEntry(Fixture(0)); SaveHistoryEntry(manyRoot, smallEntry);
+    const auto smallBytes = Read(RecordPath(manyRoot, smallEntry));
+    for (unsigned i = 0; i < 10000; ++i) {
+        char idText[40]{}; std::snprintf(idText, sizeof(idText), "%08X-0000-0000-0000-000000000000", i);
+        auto recordBytes = smallBytes; recordBytes.replace(16, 36, idText);
+        Put(manyRoot / (Wide(idText) + L".dhist"), recordBytes);
+    }
+    const auto many = ScanHistory(manyRoot);
+    Require(many.entries.size() == 10001 && many.warnings.empty(), "The index must not truncate at 10,000 files.");
+
+    // Each large fixture has valid bounded metadata, but intentionally unverified
+    // zero-filled result data. Indexing must inspect metadata only, regardless of
+    // the aggregate payload size; a detail read must still reject the bad payload.
+    const auto largeRoot = temporary.root / L"LargeMetadata"; fs::create_directory(largeRoot);
+    Batch large; large.request.name = L"Large index fixture"; large.request.notation = L"1000d1";
+    large.request.spec = Parse(large.request.notation); large.request.times = 1000;
+    auto largeEntry = NewHistoryEntry(std::move(large)); SaveHistoryEntry(largeRoot, largeEntry);
+    auto prefix = Read(RecordPath(largeRoot, largeEntry));
+    for (unsigned shift = 0; shift < 32; shift += 8) prefix[prefix.size() - 4 + shift / 8] = static_cast<char>((1000u >> shift) & 0xff);
+    const auto fileSize = static_cast<std::uintmax_t>(prefix.size()) + 1000ULL * ((12ULL + 1000ULL * 12ULL) + 24ULL);
+    for (unsigned i = 0; i < 12; ++i) {
+        char idText[40]{}; std::snprintf(idText, sizeof(idText), "%08X-1111-1111-1111-111111111111", i);
+        auto recordBytes = prefix; recordBytes.replace(16, 36, idText);
+        const auto largePath = largeRoot / (Wide(idText) + L".dhist"); Put(largePath, recordBytes); fs::resize_file(largePath, fileSize);
+    }
+    const auto largeIndex = ScanHistory(largeRoot);
+    Require(largeIndex.entries.size() == 13 && largeIndex.warnings.empty(), "Metadata indexing must not stop at a 128 MiB payload budget.");
+    Throws([&] { ReadHistoryEntry(largeRoot, "00000000-1111-1111-1111-111111111111"); });
 }

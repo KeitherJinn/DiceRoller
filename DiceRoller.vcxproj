@@ -144,6 +144,8 @@
     <ClInclude Include="DiceAnalysis.h" />
     <ClInclude Include="PresetExchange.h" />
     <ClInclude Include="FeatureWindows.h" />
+    <ClInclude Include="SingleInstance.h" />
+    <ClInclude Include="MainLayout.inl" />
     <ClInclude Include="DiceRoller.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
@@ -160,6 +162,7 @@
     <ClCompile Include="DiceAnalysis.cpp" />
     <ClCompile Include="PresetExchange.cpp" />
     <ClCompile Include="FeatureWindows.cpp" />
+    <ClCompile Include="SingleInstance.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DiceRoller.rc" />

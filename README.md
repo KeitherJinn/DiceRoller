@@ -3,6 +3,10 @@
 A C++17 / Win32 desktop dice roller for Windows 10 version 1703 or later and Windows 11.
 It uses the Windows SDK and MSVC v143; no third-party libraries or package downloads are required.
 
+One instance runs per Windows user, shared by x86/x64 and Debug/Release builds and Windows sessions. A second launch
+activates the existing window (including its open dialog) and exits before reading settings or history. The instance
+lock remains held until background work ends and is released automatically if the process stops unexpectedly.
+
 ## Features
 
 Ten feature groups extend quick dice, custom presets, remembered settings and DPI-aware windows:
@@ -60,9 +64,17 @@ Select **History...** to browse locally recorded batches. Name and formula filte
 to case. Inclusive UTC date filters use `YYYY-MM-DD`; blank dates are unbounded. **Pending export only** filters by
 CSV export status. Completed/requested counts also identify partially completed batches.
 
+Startup reads a lightweight metadata index in the background. The browser shows 100 matching batches per page,
+with pending exports first and recent records first within each status. Details/statistics load in the background
+when selected; at most two full batches are cached. **Reload** refreshes the index. **Archive** moves exported batches
+into `History\Archive`; **Include archived** makes them searchable and readable again. Pending or memory-only batches
+cannot be archived. Archiving preserves the complete record and does not delete CSV results.
+If a CSV export completed but its local status still needs saving, the batch also remains active until that update succeeds.
+
 Select a batch and use **Previous**, **Next**, or **Roll #** to inspect any completed roll. Details retain every die,
 its term/sides and retained/dropped state, both groups, target outcome and totals. Square brackets identify dropped
 dice. This view is complete even when the recent log is shortened. Read-only text fields support selection/copying.
+Enter in **Roll #** navigates within the selected batch and requires a complete positive integer.
 
 Ctrl/Shift selects multiple batches. Statistics and normalized frequency charts compare the **first two selected
 rows in list order**; **Export selected batches** includes **all** selected batches. Statistics describe the recorded
@@ -74,6 +86,8 @@ UI; **Clear log** affects only the recent display.
 select **Calculate / compare**. A uses the main window's mode; both use the same target/pool threshold from the main
 window. Change those options in the main window before reopening comparison. **Times** does not affect this one-roll
 probability distribution.
+Editing an analysis input invalidates the displayed result until recalculation. Results identify their computed
+parameters; frequency tables provide copyable values in addition to the labelled chart.
 
 - Exact calculation uses bounded convolution/enumeration with floating-point probabilities: up to 20,000 distinct
   states, 4,000,000 units of exact work, and 200,000 enumerated outcomes for a keep-rule term.
@@ -101,8 +115,11 @@ probability distribution.
 - Preset edits/imports persist immediately. Normal exit remembers valid inputs/rule options, CSV path, automatic CSV
   export, timestamp display, normal window position/size and maximized state. Invalid unfinished inputs retain the
   last valid roll configuration; an empty CSV path can be remembered.
-- Preferences/presets live in `%LOCALAPPDATA%\DiceRoller\settings.bin`. Settings version 2 reads version 1 files,
-  supplying defaults for target/pool/group fields; the next successful save writes version 2. The recognized old
+- Disabled Target/Pool controls retain their valid entered thresholds across restarts. Enabling a rule and remembering
+  its threshold are separate settings. Saving a preset validates its own name, independently of the roll-name field;
+  one-roll probability analysis does not validate the unrelated batch name or Times.
+- Preferences/presets live in `%LOCALAPPDATA%\DiceRoller\settings.bin`. Settings version 3 reads version 1/2 files,
+  supplying defaults for older fields and migrating pool enablement; the next successful save writes version 3. The recognized old
   default `dice_results_v2.csv` destination switches to the v3 filename without modifying the old CSV.
 - Missing settings use defaults. Damaged/unreadable/unsupported settings show a warning and use defaults. Before
   replacing such a file, its original bytes are preserved in a uniquely named sibling backup; failed backup prevents
@@ -113,8 +130,9 @@ probability distribution.
 
 History uses individual versioned `.dhist` records in `%LOCALAPPDATA%\DiceRoller\History`. Stable batch IDs, rules,
 complete per-die results, requested/completed counts, UTC creation times, CSV status and the last recorded export
-destination survive restart. Loading validates results against their rules without generating new randomness. A
-corrupt record is isolated with a warning and kept untouched; other valid records can still load.
+destination survive restart. Indexing validates bounded record metadata; opening/exporting details validates complete
+results against their rules without generating new randomness. A corrupt record is isolated with a warning and kept
+untouched; other valid records can still load.
 
 Unchecking **Automatically append to CSV** disables CSV export only: **local history is still written**. At completed-roll
 boundaries the worker checkpoints when roughly 500 ms have elapsed since the last checkpoint, plus a final checkpoint
@@ -166,11 +184,15 @@ Older v2 CSVs, earlier `BaseRoll,AltRoll` files and unrelated files are preserve
 They are **not imported into local History or silently converted**. The legacy v2 append routine remains for internal
 callers/tests; the application's current export workflow uses v3.
 
+Already durable records are not rewritten during normal exit. Only failed local writes and uncommitted export-status
+updates are retried on a background worker before closing. If that retry fails, staying open retains the exact data
+for another attempt. Batch exports read one record at a time and check cancellation between records.
+
 ### Storage limits
 
-- Each history record: **32 MiB**. One startup load: at most **10,000 history files** and **128 MiB** of serialized
-  record data. Oversized/unreadable/excess records produce warnings and remain on disk. These are load bounds,
-  not automatic deletion or history-retention limits.
+- Each history record: **32 MiB**. The application metadata index has no 10,000-record or 128 MiB total-history cutoff;
+  metadata grows with the record count while full result data loads only as needed. Oversized/unreadable records
+  produce warnings and remain on disk. The legacy full-load helper retains its defensive limits for internal callers.
 - Combined CSV, including existing content: **512 MiB**. Choose a new file or fewer batches when reached;
   an oversized existing CSV remains unchanged.
 - Settings/preset-exchange files: **256 KiB** each. Preset files contain at most 50 entries.
@@ -181,8 +203,11 @@ callers/tests; the application's current export workflow uses v3.
 
 - Win32 windows scale fonts/layout for per-monitor DPI. Main-window placement/DPI transitions fit the current
   monitor work area; an unavailable saved monitor falls back to the nearest available one.
-- Small/high-scale windows scroll rather than shrink text. Main actions use two rows. Scrollbars, mouse wheel
-  and focus-visibility handling keep controls reachable.
+- Narrow windows reflow controls into fewer columns; explanations use measured text heights. Main actions and feature
+  window actions remain in fixed footers while body content scrolls. Layouts support 320-DIP content width, with
+  horizontal fallback only below that width. Scrollbars, mouse wheel and keyboard focus keep content reachable.
+  The main status area shows up to three lines and scrolls longer messages. Below the minimum content width,
+  main actions stay fixed vertically and move with horizontal scrolling so keyboard focus can reveal each action.
 - Tab/Shift+Tab navigate; arrows select roll mode; Enter invokes the current default action. Alt+X exports pending batches. F1 opens About;
   File > Exit closes the application. Buttons/labels expose their underlined access keys.
 - **Copy log** copies only the retained recent display. **Clear log** leaves History, pending exports and CSV files intact.
@@ -194,14 +219,16 @@ callers/tests; the application's current export workflow uses v3.
 - `HistoryStore.h/.cpp`: durable records, validated recovery, queries and atomic/idempotent v3 combined export.
 - `ResultStore.h/.cpp`: Unicode, readable results, bounded recent log, stable paths and legacy v2 append.
 - `RollJob.h/.cpp`: background work, cancellation, checkpoints, combined export and saved-state updates.
-- `AppSettings.h/.cpp`: validated preferences/presets, v1 migration, backups and atomic replacement.
+- `AppSettings.h/.cpp`: validated preferences/presets, v1/v2 migration, backups and atomic replacement.
 - `PresetExchange.h/.cpp`: `.drpresets` exchange and group/rule-aware duplicate previews/merge strategies.
 - `FeatureWindows.h/.cpp`: history/details/statistics, distribution chart, probability comparison and import preview UI.
 - `WindowLayout.h/.cpp`: screen-coordinate placement and DPI-aware minimum sizes bounded by the work area.
-- `main.cpp`: primary controls/layout, rule/preset input, remembered state and worker integration.
+- `MainLayout.inl`: responsive main form, measured text, fixed actions and scrolling/focus visibility.
+- `SingleInstance.h/.cpp`: per-user ownership and activation of the existing window.
+- `main.cpp`: primary controls, independent rule/roll inputs, metadata/dirty-state integration and asynchronous shutdown.
 - `DiceRoller.rc`, `Resource.h`, `DiceRoller.manifest`: menu, About, icons, IDs, visual styles and DPI declaration.
 - `tests/Tests.cpp`, `UiTests.cpp`, `SettingsTests.cpp`, `AnalysisTests.cpp`, `HistoryTests.cpp`, `PresetTests.cpp`,
-  `FeatureWindowTests.cpp`, `WorkerHistoryTests.cpp`:
+  `FeatureWindowTests.cpp`, `WorkerHistoryTests.cpp`, `SingleInstanceTests.cpp`, `MainLayoutTests.inl`:
   dependency-free rules, storage, analysis, exchange and hidden-window integration regressions.
 
 ## Build and test
