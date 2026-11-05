@@ -42,6 +42,7 @@ struct AppSettings {
     int successThreshold = 8; // Remembered even while pool mode is disabled.
     Target target;
     bool poolEnabled = false;
+    bool quickRollImmediately = false;
 };
 
 struct SettingsLoad {

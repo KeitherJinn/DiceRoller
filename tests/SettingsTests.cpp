@@ -34,7 +34,8 @@ bool Equal(const dice::AppSettings& a, const dice::AppSettings& b) {
         a.window.width != b.window.width || a.window.height != b.window.height ||
         a.window.maximized != b.window.maximized || a.presets.size() != b.presets.size() ||
         a.successThreshold != b.successThreshold || a.poolEnabled != b.poolEnabled || a.target.enabled != b.target.enabled ||
-        a.target.comparison != b.target.comparison || a.target.value != b.target.value) return false;
+        a.target.comparison != b.target.comparison || a.target.value != b.target.value ||
+        a.quickRollImmediately != b.quickRollImmediately) return false;
     for (std::size_t i = 0; i < a.presets.size(); ++i) {
         if (a.presets[i].name != b.presets[i].name || a.presets[i].notation != b.presets[i].notation ||
             a.presets[i].times != b.presets[i].times || a.presets[i].mode != b.presets[i].mode ||
@@ -58,7 +59,7 @@ std::size_t SkipString(const std::string& bytes, std::size_t offset) {
     Require(offset + count <= bytes.size(), "Invalid settings fixture string size.");
     return offset + count;
 }
-// Construct v1/v2 independently; production schema changes cannot erase coverage.
+// Construct v1/v2/v3 independently; production schema changes cannot erase coverage.
 std::string LegacySettings(const dice::AppSettings& settings, unsigned version = 1) {
     std::string bytes = "DRSETTIN";
     auto number = [&](std::uint32_t value) {
@@ -79,16 +80,17 @@ std::string LegacySettings(const dice::AppSettings& settings, unsigned version =
     for (const auto& preset : settings.presets) {
         text(preset.name); text(preset.notation); number(preset.times); number(static_cast<std::uint32_t>(preset.mode));
     }
-    if (version == 2) {
+    if (version >= 2) {
         auto rules = [&](int threshold, const dice::Target& target) {
             number(static_cast<std::uint32_t>(threshold)); number(target.enabled);
             number(static_cast<std::uint32_t>(target.comparison));
             const auto value = static_cast<std::uint64_t>(target.value);
             number(static_cast<std::uint32_t>(value)); number(static_cast<std::uint32_t>(value >> 32));
         };
-        rules(settings.poolEnabled ? settings.successThreshold : 0, settings.target);
+        rules(version >= 3 || settings.poolEnabled ? settings.successThreshold : 0, settings.target);
         for (const auto& preset : settings.presets) { text(preset.group); rules(preset.successThreshold, preset.target); }
     }
+    if (version >= 3) number(settings.poolEnabled);
     return bytes;
 }
 }
@@ -101,6 +103,8 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
     const auto damaged = directory / L"damaged.bin";
     AppSettings defaults;
     defaults.csvPath = (directory / L"default.csv").wstring();
+    Require(!defaults.quickRollImmediately && !DefaultSettings().quickRollImmediately,
+        "Immediate quick rolling must be disabled for new configurations.");
 
     const auto missing = LoadSettings(directory / L"missing.bin", defaults);
     Require(!missing.found && missing.warning.empty() && Equal(missing.settings, defaults),
@@ -130,7 +134,16 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
     Require(loaded.found && loaded.warning.empty() && Equal(loaded.settings, original),
         "Unicode settings, negative screen positions and presets must round-trip exactly.");
     const auto bytes = Read(path);
-    Require(static_cast<unsigned char>(bytes[8]) == 3, "Settings must be written with the v3 schema.");
+    Require(static_cast<unsigned char>(bytes[8]) == 4, "Settings must be written with the v4 schema.");
+    const auto quickPath = directory / L"quick-roll.bin";
+    auto quickSettings = original;
+    for (const bool enabled : { true, false }) {
+        quickSettings.quickRollImmediately = enabled;
+        SaveSettings(quickPath, quickSettings);
+        const auto quickLoaded = LoadSettings(quickPath, defaults);
+        Require(quickLoaded.found && quickLoaded.warning.empty() && Equal(quickLoaded.settings, quickSettings),
+            "Enabling and then disabling immediate quick rolling must preserve all settings across restart.");
+    }
     const auto legacyPath = directory / L"legacy-v1.bin";
     const auto legacyBytes = LegacySettings(original);
     Put(legacyPath, legacyBytes);
@@ -144,8 +157,8 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
         "Version 1 settings must retain old fields and default all new rule/group fields.");
     Require(Read(legacyPath) == legacyBytes, "Loading v1 settings must not rewrite or back up the file.");
     SaveSettings(legacyPath, legacyLoaded.settings);
-    Require(static_cast<unsigned char>(Read(legacyPath)[8]) == 3 && Equal(LoadSettings(legacyPath, defaults).settings, legacyExpected),
-        "Saving loaded v1 settings must migrate to v3 without changing their preferences.");
+    Require(static_cast<unsigned char>(Read(legacyPath)[8]) == 4 && Equal(LoadSettings(legacyPath, defaults).settings, legacyExpected),
+        "Saving loaded v1 settings must migrate to v4 without changing their preferences.");
 
     const auto version2Path = directory / L"legacy-v2.bin";
     Put(version2Path, LegacySettings(original, 2));
@@ -163,8 +176,24 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
     Require(version2Enabled.warning.empty() && Equal(version2Enabled.settings, poolSettings) && Read(version2Path) == version2Bytes,
         "A v2 positive threshold must enable its pool without changing the value or file.");
     SaveSettings(version2Path, version2Enabled.settings);
-    Require(static_cast<unsigned char>(Read(version2Path)[8]) == 3 && Equal(LoadSettings(version2Path, defaults).settings, poolSettings),
-        "Saving migrated v2 settings must preserve pool state in v3.");
+    Require(static_cast<unsigned char>(Read(version2Path)[8]) == 4 && Equal(LoadSettings(version2Path, defaults).settings, poolSettings),
+        "Saving migrated v2 settings must preserve pool state in v4.");
+    const auto version3Path = directory / L"legacy-v3.bin";
+    auto version3Defaults = defaults;
+    version3Defaults.quickRollImmediately = true;
+    for (const bool poolEnabled : { false, true }) {
+        auto version3Expected = poolEnabled ? poolSettings : original;
+        const auto version3Bytes = LegacySettings(version3Expected, 3);
+        Put(version3Path, version3Bytes);
+        const auto version3Loaded = LoadSettings(version3Path, version3Defaults);
+        Require(version3Loaded.found && version3Loaded.warning.empty() && Equal(version3Loaded.settings, version3Expected) &&
+            !version3Loaded.settings.quickRollImmediately && Read(version3Path) == version3Bytes,
+            "Version 3 settings must preserve rules and presets, default immediate quick rolling off and remain unchanged on load.");
+        SaveSettings(version3Path, version3Loaded.settings);
+        const auto version4Loaded = LoadSettings(version3Path, defaults);
+        Require(static_cast<unsigned char>(Read(version3Path)[8]) == 4 && version4Loaded.warning.empty() &&
+            Equal(version4Loaded.settings, version3Expected), "Saving migrated v3 settings must preserve all preferences in v4.");
+    }
     const auto rulesPath = directory / L"all-rules.bin";
     for (const auto comparison : { Compare::AtLeast, Compare::AtMost, Compare::Equal, Compare::Greater, Compare::Less }) {
         for (const auto value : { (std::numeric_limits<std::int64_t>::min)(), (std::numeric_limits<std::int64_t>::max)() }) {
@@ -232,9 +261,11 @@ void SettingsRegressionTests(const std::filesystem::path& base) {
         SetU32(bad, legacyBytes.size() + mutation.first, mutation.second);
         rejectedLoad(bad);
     }
-    bad = bytes;
-    SetU32(bad, bytes.size() - 4, 2);
-    rejectedLoad(bad);
+    for (const std::size_t fromEnd : { std::size_t(8), std::size_t(4) }) {
+        bad = bytes;
+        SetU32(bad, bytes.size() - fromEnd, 2); // poolEnabled and quickRollImmediately
+        rejectedLoad(bad);
+    }
     const auto damagedBackup = BackupSettings(damaged);
     Require(Read(damagedBackup) == bad && Read(damaged) == bad,
         "An invalid configuration must be backed up verbatim without being parsed or rewritten.");

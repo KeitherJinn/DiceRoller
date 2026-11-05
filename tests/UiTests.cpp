@@ -28,6 +28,7 @@ struct TestWindow {
         wc.cbSize = sizeof(wc);
         wc.lpfnWndProc = WindowProc;
         wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"DiceRollerRegressionWindow";
         wc.lpszMenuName = MAKEINTRESOURCEW(IDC_DICEROLLER);
         wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(IDI_DICEROLLER));
@@ -73,23 +74,38 @@ bool Contains(const RECT& outer, const RECT& inner) {
 void SetRoll(App& app, const wchar_t* notation = L"1d1+0", const wchar_t* times = L"2") {
     SetWindowTextW(Control(app, IDC_DICE_EDIT), notation);
     SetWindowTextW(Control(app, IDC_TIMES_EDIT), times);
-    CheckRadioButton(app.window, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_NORMAL);
+    SetMode(app, dice::Mode::Normal);
     SendMessageW(Control(app, IDC_AUTOSAVE), BM_SETCHECK, BST_UNCHECKED, 0);
 }
 void CheckVirtualLayout(App& app) {
-    for (HWND child = GetWindow(app.window, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
-        auto bounds = Bounds(child, app.window);
-        RECT content{};
-        if (IsFooterControl(GetDlgCtrlID(child))) GetClientRect(app.window, &content);
-        else { OffsetRect(&bounds, app.scrollX, app.scrollY); content = {0, 0, app.contentWidth + 1, app.contentHeight + 1}; }
-        CheckUi(Contains(content, bounds), "A control falls outside the scrollable content.");
+    CheckUi(IsWindow(app.body) && GetParent(app.body) == app.window, "Scrollable body must be a child viewport of the main window.");
+    const auto bodyBounds = Bounds(app.body, app.window);
+    CheckUi(bodyBounds.left == 0 && bodyBounds.top == 0 && bodyBounds.bottom == app.bodyHeight,
+        "Body viewport must clip controls above the fixed footer.");
+    for (HWND parent : {app.body, app.window}) {
+        for (HWND child = GetWindow(parent, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+            if (child == app.body) continue;
+            const bool footer = IsFooterControl(GetDlgCtrlID(child));
+            CheckUi(footer == (parent == app.window), "Control belongs to the wrong body/footer container.");
+            auto bounds = Bounds(child, app.window);
+            RECT content{};
+            if (footer) {
+                GetClientRect(app.window, &content);
+                content.top = app.bodyHeight;
+            } else {
+                OffsetRect(&bounds, app.scrollX, app.scrollY);
+                content = {0, 0, app.contentWidth + 1, app.contentHeight + 1};
+            }
+            CheckUi(Contains(content, bounds), "A control falls outside its scrollable body or fixed footer.");
+        }
     }
     const int actions[] = {IDC_ROLL, IDC_CANCEL, IDC_SAVE, IDC_DISCARD, IDC_OPEN, IDC_COPY, IDC_CLEAR};
     for (std::size_t i = 0; i < std::size(actions); ++i)
         for (std::size_t j = i + 1; j < std::size(actions); ++j) {
             auto first = Bounds(Control(app, actions[i]), app.window);
             auto second = Bounds(Control(app, actions[j]), app.window);
-            const RECT body{0, 0, app.contentWidth, app.bodyHeight};
+            RECT body{}; GetClientRect(app.body, &body);
+            MapWindowPoints(app.body, app.window, reinterpret_cast<POINT*>(&body), 2);
             if (!IsFooterControl(actions[i])) IntersectRect(&first, &first, &body);
             if (!IsFooterControl(actions[j])) IntersectRect(&second, &second, &body);
             RECT overlap{};
@@ -279,8 +295,36 @@ void UiRegressionTests(const std::filesystem::path& base) {
     fileTab.hwnd = GetFocus(); fileTab.message = WM_KEYDOWN; fileTab.wParam = VK_TAB;
     CheckUi(IsDialogMessageW(app.window, &fileTab) && GetFocus() == Control(app, IDC_BROWSE),
         "CSV path does not tab to Browse.");
+    SetFocus(Control(app, IDC_OUTPUT));
+    MSG bodyTab{};
+    bodyTab.hwnd = GetFocus(); bodyTab.message = WM_KEYDOWN; bodyTab.wParam = VK_TAB;
+    const auto bodyTabConsumed = IsDialogMessageW(app.window, &bodyTab);
+    if (!bodyTabConsumed || GetFocus() != Control(app, IDC_ROLL))
+        throw std::runtime_error("Tab body to footer: consumed=" + std::to_string(bodyTabConsumed) +
+            ", focus=" + std::to_string(GetDlgCtrlID(GetFocus())) + ", next=" +
+            std::to_string(GetDlgCtrlID(GetNextDlgTabItem(app.window, Control(app, IDC_OUTPUT), FALSE))) +
+            ", code=" + std::to_string(SendMessageW(Control(app, IDC_OUTPUT), WM_GETDLGCODE, VK_TAB, reinterpret_cast<LPARAM>(&bodyTab))));
+    // SetKeyboardState changes only this test thread's state; it does not inject
+    // an input event or alter the user's desktop keyboard state.
+    BYTE originalKeys[256]{};
+    CheckUi(GetKeyboardState(originalKeys), "Could not inspect the test thread keyboard state.");
+    BYTE reverseKeys[256]{}; std::copy(std::begin(originalKeys), std::end(originalKeys), std::begin(reverseKeys));
+    reverseKeys[VK_SHIFT] |= 0x80;
+    CheckUi(SetKeyboardState(reverseKeys), "Could not set the test thread's reverse-tab modifier.");
+    MSG reverseTab{};
+    reverseTab.hwnd = GetFocus(); reverseTab.message = WM_KEYDOWN; reverseTab.wParam = VK_TAB;
+    const auto reverseConsumed = IsDialogMessageW(app.window, &reverseTab);
+    const bool reversedToBody = GetFocus() == Control(app, IDC_OUTPUT);
+    CheckUi(SetKeyboardState(originalKeys), "Could not restore the test thread keyboard state.");
+    CheckUi(reverseConsumed && reversedToBody, "Shift+Tab from the Roll footer must return to the final body field.");
+    SetFocus(Control(app, IDC_STATUS));
+    MSG footerTab{};
+    footerTab.hwnd = GetFocus(); footerTab.message = WM_KEYDOWN; footerTab.wParam = VK_TAB;
+    CheckUi(IsDialogMessageW(app.window, &footerTab) &&
+        (GetFocus() == Control(app, IDC_PRESET) || IsChild(Control(app, IDC_PRESET), GetFocus())),
+        "Tab from the final footer field must return to the first body field.");
 
-    CheckRadioButton(app.window, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_NORMAL);
+    SetMode(app, dice::Mode::Normal);
     SetWindowTextW(Control(app, IDC_DICE_EDIT), L"1d1+0");
     SetWindowTextW(Control(app, IDC_TIMES_EDIT), L"2");
     SendMessageW(Control(app, IDC_AUTOSAVE), BM_SETCHECK, BST_UNCHECKED, 0);
@@ -306,6 +350,81 @@ void UiRegressionTests(const std::filesystem::path& base) {
     RefreshLog(app);
     CheckUi(!app.logFailed && Text(Control(app, IDC_OUTPUT)).size() <= dice::LogBuffer::MaxCharacters,
         "Large log failed to display within its budget.");
+}
+
+void UiQuickRollTests(const std::filesystem::path& base) {
+    {
+        TestWindow test(base);
+        auto& app = test.app;
+        app.historyRoot = base / L"quick-history";
+        SetRoll(app, L"1d1", L"7");
+        CheckUi(!Checked(app, IDC_QUICK_IMMEDIATE), "Immediate quick rolling must default to off.");
+        SendMessageW(Control(app, IDC_QUICK_FIRST), BM_CLICK, 0, 0);
+        CheckUi(!Busy(app) && app.history.empty() && Text(Control(app, IDC_DICE_EDIT)) == L"1d4",
+            "A quick die rolled while the switch was off.");
+        SendMessageW(Control(app, IDC_QUICK_IMMEDIATE), BM_CLICK, 0, 0);
+        CheckUi(Checked(app, IDC_QUICK_IMMEDIATE) && !Busy(app), "Enabling the switch must not itself roll dice.");
+        SetMode(app, dice::Mode::Advantage);
+        SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, BST_CHECKED, 0);
+        SetWindowTextW(Control(app, IDC_TARGET_VALUE), L"1");
+        for (int i = 0; i < 7; ++i) {
+            const auto before = app.history.size();
+            SendMessageW(Control(app, IDC_QUICK_FIRST + i), BM_CLICK, 0, 0);
+            CheckUi(Busy(app) && app.requested == 1 && !IsWindowEnabled(Control(app, IDC_QUICK_IMMEDIATE)),
+                "A quick click did not start exactly one roll or lock its option during work.");
+            // A queued second command must not alter the in-flight request.
+            SendMessageW(app.window, WM_COMMAND, MAKEWPARAM(IDC_QUICK_FIRST + (i + 1) % 7, BN_CLICKED),
+                reinterpret_cast<LPARAM>(Control(app, IDC_QUICK_FIRST + (i + 1) % 7)));
+            WaitUi(app);
+            CheckUi(app.history.size() == before + 1 && IsWindowEnabled(Control(app, IDC_QUICK_IMMEDIATE)),
+                "A busy quick click created an extra batch or left the switch disabled.");
+            const auto& summary = app.history.back();
+            CheckUi(summary.request.notation == L"1d" + std::to_wstring(QuickSides[i]) &&
+                summary.request.times == 1 && summary.resultCount == 1 && summary.request.mode == dice::Mode::Advantage &&
+                summary.request.target.enabled && summary.request.target.value == 1 && !summary.saved,
+                "Immediate quick rolling lost the selected die, one-roll count, mode, target or save policy.");
+            const auto record = dice::ReadHistoryEntry(app.historyRoot, summary.id);
+            const auto& result = record.batch.results.front();
+            CheckUi(result.first.dice.size() == 1 && result.second && result.second->dice.size() == 1 &&
+                result.finalValue >= 1 && result.finalValue <= QuickSides[i], "Quick result is outside the selected die's range.");
+            CheckUi(Text(Control(app, IDC_TIMES_EDIT)) == L"7" && Checked(app, IDC_RAD_ADV),
+                "A quick click changed the regular batch count or mode.");
+        }
+        // An unfinished batch count is irrelevant to a one-roll quick action.
+        SetWindowTextW(Control(app, IDC_TIMES_EDIT), L"");
+        SendMessageW(Control(app, IDC_AUTOSAVE), BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(Control(app, IDC_POOL), BM_SETCHECK, BST_CHECKED, 0);
+        SetWindowTextW(Control(app, IDC_POOL_VALUE), L"1");
+        const auto csv = base / L"quick.csv";
+        SetWindowTextW(Control(app, IDC_FILE_EDIT), csv.c_str());
+        SendMessageW(Control(app, IDC_QUICK_FIRST), BM_CLICK, 0, 0); WaitUi(app);
+        const auto& saved = app.history.back();
+        CheckUi(saved.saved && saved.resultCount == 1 && saved.request.spec.successThreshold == 1 &&
+            dice::ReadHistoryEntry(app.historyRoot, saved.id).batch.results.front().finalValue == 1 &&
+            std::filesystem::exists(csv) && Text(Control(app, IDC_TIMES_EDIT)).empty(),
+            "Immediate quick rolling failed to honor pool/automatic export or consumed the batch count.");
+        SetWindowTextW(Control(app, IDC_TIMES_EDIT), L"7");
+        SendMessageW(Control(app, IDC_QUICK_IMMEDIATE), BM_CLICK, 0, 0);
+        const auto before = app.history.size();
+        SendMessageW(Control(app, IDC_QUICK_FIRST + 5), BM_CLICK, 0, 0);
+        CheckUi(!Busy(app) && app.history.size() == before && Text(Control(app, IDC_DICE_EDIT)) == L"1d20",
+            "Disabling the switch did not restore selection-only behavior.");
+        SendMessageW(Control(app, IDC_QUICK_IMMEDIATE), BM_CLICK, 0, 0);
+        Close(app);
+        CheckUi(!IsWindow(app.window), "Could not close after a durable quick roll.");
+    }
+    {
+        TestWindow reopened(base, true);
+        auto& app = reopened.app;
+        CheckUi(Checked(app, IDC_QUICK_IMMEDIATE) && Text(Control(app, IDC_TIMES_EDIT)) == L"7",
+            "Immediate quick-roll preference or regular batch count was not restored.");
+        SendMessageW(Control(app, IDC_QUICK_IMMEDIATE), BM_CLICK, 0, 0);
+        Close(app);
+    }
+    {
+        TestWindow reopened(base, true);
+        CheckUi(!Checked(reopened.app, IDC_QUICK_IMMEDIATE), "Disabling immediate quick rolling did not persist.");
+    }
 }
 
 void UiFeatureTests(const std::filesystem::path& base) {
@@ -341,7 +460,7 @@ void UiFeatureTests(const std::filesystem::path& base) {
 
         SetWindowTextW(Control(app, IDC_TIMES_EDIT), L"7");
         SetWindowTextW(Control(app, IDC_NAME_EDIT), L"Original name");
-        CheckRadioButton(app.window, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_ADV);
+        SetMode(app, dice::Mode::Advantage);
         for (int i = 0; i < 7; ++i) {
             QuickDie(app, i);
             CheckUi(Text(Control(app, IDC_DICE_EDIT)) == L"1d" + std::to_wstring(QuickSides[i]), "A quick die has the wrong formula.");
@@ -515,11 +634,12 @@ void UiViewportTests(const std::filesystem::path& base) {
     }
     ResizeClient(app, 560, 300, 192);
     RECT viewport{};
-    GetClientRect(app.window, &viewport);
+    GetClientRect(app.body, &viewport);
+    MapWindowPoints(app.body, app.window, reinterpret_cast<POINT*>(&viewport), 2);
     CheckUi(app.contentHeight > viewport.bottom, "Small high-DPI window does not expose scrollable content.");
     Scroll(app, SB_VERT, SB_BOTTOM);
-    const auto footer = Bounds(Control(app, IDC_RETENTION), app.window);
-    CheckUi(app.scrollY > 0 && footer.bottom <= viewport.bottom && footer.top >= 0,
+    const auto finalContent = Bounds(Control(app, IDC_RETENTION), app.window);
+    CheckUi(app.scrollY > 0 && Contains(viewport, finalContent),
         "Scrolling to the bottom does not reveal the final content.");
     SetFocus(Control(app, IDC_PRESET_SAVE));
     EnsureFocusVisible(app);
@@ -534,13 +654,14 @@ void UiViewportTests(const std::filesystem::path& base) {
     CheckUi(app.scrollY > 0, "Mouse wheel does not scroll the form.");
 
     // Deliberately undersize our hidden test window to exercise horizontal fallback.
-    SetWindowPos(app.window, nullptr, 0, 0, 420, 500, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(app.window, nullptr, 0, 0, 420, 900, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     // Windows enforces the physical minimum during SetWindowPos. Simulate a
     // still higher scale in that fixed viewport, as on a narrow high-DPI monitor.
     app.dpi = 384;
     SetFont(app);
     Layout(app);
-    GetClientRect(app.window, &viewport);
+    GetClientRect(app.body, &viewport);
+    MapWindowPoints(app.body, app.window, reinterpret_cast<POINT*>(&viewport), 2);
     CheckUi(app.contentWidth > viewport.right, "Narrow viewport has no horizontal fallback.");
     SetFocus(Control(app, IDC_PRESET_DELETE));
     EnsureFocusVisible(app);

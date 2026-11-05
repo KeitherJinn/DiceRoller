@@ -58,6 +58,19 @@ void ClipChildToViewport(HWND child, HWND parent, const RECT& viewport) {
     RECT visible{};
     if (IntersectRect(&visible, &bounds, &viewport)) OffsetRect(&visible, -bounds.left, -bounds.top);
     const auto region = CreateRectRgnIndirect(&visible);
-    if (region && !SetWindowRgn(child, region, FALSE)) DeleteObject(region);
+    if (!region) return;
+    const auto current = CreateRectRgn(0, 0, 0, 0);
+    if (current) {
+        const bool unchanged = GetWindowRgn(child, current) != ERROR && EqualRgn(current, region);
+        DeleteObject(current);
+        if (unchanged) { DeleteObject(region); return; }
+    }
+    // SetWindowRgn sends position-change messages even when the region is equal.
+    // Only transfer ownership for a real clipping change; redraw once after layout.
+    if (!SetWindowRgn(child, region, FALSE)) DeleteObject(region);
+}
+void RedrawLayout(HWND window) {
+    RedrawWindow(window, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 }

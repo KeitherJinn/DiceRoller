@@ -20,12 +20,13 @@
 namespace {
 constexpr UINT_PTR PollTimer = 1;
 constexpr UINT FocusChanged = WM_APP + 1;
-// Group-box interiors are transparent. Let the parent erase their old contents
-// before repainting children after a scroll, rather than clipping out the whole box.
-constexpr DWORD MainStyle = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL;
+// The body is a real child viewport, so its controls cannot draw over the footer.
+// Group boxes live inside that body, whose background remains normally erased.
+constexpr DWORD MainStyle = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL | WS_CLIPCHILDREN;
 constexpr int QuickSides[] = {4, 6, 8, 10, 12, 20, 100};
 struct App {
     HWND window = nullptr;
+    HWND body = nullptr;
     HFONT font = nullptr;
     UINT dpi = 96;
     int defaultButton = IDC_ROLL;
@@ -59,8 +60,14 @@ struct App {
     dice::RollJob job;
     ~App() { cancelIndex = true; if (historyScan.valid()) historyScan.wait(); if (font) DeleteObject(font); }
 };
-HWND Control(const App& app, int id) { return GetDlgItem(app.window, id); }
+HWND Control(const App& app, int id) {
+    const auto control = GetDlgItem(app.window, id);
+    return control ? control : GetDlgItem(app.body, id);
+}
 bool Checked(const App& app, int id) { return SendMessageW(Control(app, id), BM_GETCHECK, 0, 0) == BST_CHECKED; }
+void SetMode(App& app, dice::Mode mode) {
+    CheckRadioButton(app.body, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_NORMAL + static_cast<int>(mode));
+}
 bool Busy(const App& app) { return app.historyLoading || app.job.State() != dice::Phase::Idle; }
 bool HasPending(const App& app) {
     if (app.historyRoot.empty()) return static_cast<bool>(app.pending);
@@ -72,7 +79,8 @@ void EnsureFocusVisible(App& app);
 bool FinishClose(App& app);
 void RefreshPresets(App& app, const std::wstring& selected = {}, bool rebuildGroups = true);
 void RestoreRequest(App& app, const dice::Request& request);
-dice::Request ReadRequest(const App& app);
+dice::Request ReadRequest(const App& app, bool singleRoll = false);
+void StartRoll(App& app, bool singleRoll = false);
 void History(App& app);
 void ExchangePresets(App& app, bool importing);
 
@@ -101,7 +109,7 @@ void EnableActions(App& app) {
                    IDC_RAD_NORMAL, IDC_RAD_ADV, IDC_RAD_DISADV, IDC_TIMESTAMP,
                    IDC_AUTOSAVE, IDC_BROWSE, IDC_OPEN, IDC_PRESET, IDC_PRESET_APPLY,
                    IDC_PRESET_SAVE, IDC_PRESET_DELETE, IDC_GROUP, IDC_IMPORT, IDC_EXPORT_PRESETS,
-                   IDC_TARGET, IDC_COMPARISON, IDC_TARGET_VALUE, IDC_POOL, IDC_POOL_VALUE, IDC_PROBABILITY})
+                   IDC_TARGET, IDC_COMPARISON, IDC_TARGET_VALUE, IDC_POOL, IDC_POOL_VALUE, IDC_PROBABILITY, IDC_QUICK_IMMEDIATE})
         EnableWindow(Control(app, id), !busy);
     for (int id = IDC_QUICK_FIRST; id <= IDC_QUICK_LAST; ++id) EnableWindow(Control(app, id), !busy);
     EnableWindow(Control(app, IDC_ROLL), !busy);
@@ -151,7 +159,13 @@ void Scroll(App& app, int bar, UINT action) {
 LRESULT CALLBACK FocusProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
                                  UINT_PTR, DWORD_PTR parent) {
     if (message == WM_SETFOCUS) PostMessageW(reinterpret_cast<HWND>(parent), FocusChanged, 0, 0);
-    return DefSubclassProc(window, message, wParam, lParam);
+    auto result = DefSubclassProc(window, message, wParam, lParam);
+    // Read-only multiline edits request all keys by default. Let dialog navigation
+    // handle Tab/Shift+Tab so the log and status do not trap keyboard focus.
+    if (message == WM_GETDLGCODE && wParam == VK_TAB &&
+        (GetDlgCtrlID(window) == IDC_OUTPUT || GetDlgCtrlID(window) == IDC_STATUS))
+        result &= ~(DLGC_WANTALLKEYS | DLGC_WANTTAB);
+    return result;
 }
 
 void SetFont(App& app) {
@@ -159,16 +173,38 @@ void SetFont(App& app) {
         FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!font) throw std::runtime_error("Could not create the interface font.");
-    for (HWND child = GetWindow(app.window, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
-        SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    for (HWND parent : {app.window, app.body})
+        for (HWND child = GetWindow(parent, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     if (app.font) DeleteObject(app.font);
     app.font = font;
 }
 
+LRESULT CALLBACK MainBodyProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    // Native notifications go to the immediate parent; commands still belong to
+    // the main window, including keyboard/mouse scrolling and owner-drawn items.
+    switch (message) {
+    case WM_COMMAND: case WM_NOTIFY: case WM_DRAWITEM:
+    case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+        return SendMessageW(GetParent(window), message, wParam, lParam);
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
 void Setup(App& app) {
+    WNDCLASSEXW bodyClass{sizeof(bodyClass)};
+    bodyClass.hInstance = GetModuleHandleW(nullptr);
+    bodyClass.lpfnWndProc = MainBodyProc;
+    bodyClass.lpszClassName = L"DiceRollerMainBody";
+    bodyClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    bodyClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    if (!RegisterClassExW(&bodyClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        throw std::runtime_error("Could not register the main form viewport.");
+    app.body = CreateWindowExW(WS_EX_CONTROLPARENT, bodyClass.lpszClassName, L"", WS_CHILD | WS_VISIBLE,
+        0, 0, 0, 0, app.window, reinterpret_cast<HMENU>(IDC_MAIN_BODY), bodyClass.hInstance, nullptr);
+    if (!app.body) throw std::runtime_error("Could not create the main form viewport.");
     auto add = [&](int id, const wchar_t* type, const wchar_t* title, DWORD style, DWORD ex = 0) {
         const auto control = CreateWindowExW(ex, type, title, WS_VISIBLE | WS_CHILD | style,
-            0, 0, 0, 0, app.window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+            0, 0, 0, 0, IsFooterControl(id) ? app.window : app.body, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
             GetModuleHandleW(nullptr), nullptr);
         if (!control) throw std::runtime_error("Could not create a window control.");
         SetWindowSubclass(control, FocusProcedure, 1, reinterpret_cast<DWORD_PTR>(app.window));
@@ -195,6 +231,9 @@ void Setup(App& app) {
         const auto title = L"d" + std::to_wstring(QuickSides[i]);
         add(IDC_QUICK_FIRST + i, L"BUTTON", title.c_str(), button);
     }
+    add(IDC_QUICK_IMMEDIATE, L"BUTTON", L"Roll once on quick-die click", BS_AUTOCHECKBOX | WS_TABSTOP);
+    SendMessageW(Control(app, IDC_QUICK_IMMEDIATE), BM_SETCHECK,
+        app.settings.quickRollImmediately ? BST_CHECKED : BST_UNCHECKED, 0);
     add(IDC_DICE_LABEL, L"STATIC", L"&Dice:", 0);
     SendMessageW(add(IDC_DICE_EDIT, L"EDIT", app.settings.notation.c_str(), edit, WS_EX_CLIENTEDGE), EM_LIMITTEXT, 1024, 0);
     add(IDC_TIMES_LABEL, L"STATIC", L"&Times:", 0);
@@ -203,7 +242,7 @@ void Setup(App& app) {
     add(IDC_RAD_NORMAL, L"BUTTON", L"N&ormal", BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP);
     add(IDC_RAD_ADV, L"BUTTON", L"&Advantage", BS_AUTORADIOBUTTON);
     add(IDC_RAD_DISADV, L"BUTTON", L"Disad&vantage", BS_AUTORADIOBUTTON);
-    CheckRadioButton(app.window, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_NORMAL + static_cast<int>(app.settings.mode));
+    SetMode(app, app.settings.mode);
     add(IDC_RULES, L"STATIC", L"Roll whole group twice: Advantage keeps higher; Disadvantage lower.\r\n"
         L"Examples: 2d6+1d4+3; 4d6kh3; 4d6kl2. Pool counts kept dice meeting its threshold.", SS_NOPREFIX | WS_GROUP);
     add(IDC_NAME_LABEL, L"STATIC", L"&Name:", 0);
@@ -288,10 +327,10 @@ dice::Request ReadRules(const App& app) {
     dice::Validate(request);
     return request;
 }
-dice::Request ReadRequest(const App& app) {
+dice::Request ReadRequest(const App& app, bool singleRoll) {
     auto request = ReadRules(app);
     request.name = dice::Trim(Text(Control(app, IDC_NAME_EDIT)));
-    request.times = dice::ParseTimes(Text(Control(app, IDC_TIMES_EDIT)));
+    request.times = singleRoll ? 1 : dice::ParseTimes(Text(Control(app, IDC_TIMES_EDIT)));
     dice::Validate(request);
     return request;
 }
@@ -299,7 +338,7 @@ void RestoreRequest(App& app, const dice::Request& request) {
     SetWindowTextW(Control(app, IDC_DICE_EDIT), request.notation.c_str());
     SetWindowTextW(Control(app, IDC_TIMES_EDIT), std::to_wstring(request.times).c_str());
     SetWindowTextW(Control(app, IDC_NAME_EDIT), request.name.c_str());
-    CheckRadioButton(app.window, IDC_RAD_NORMAL, IDC_RAD_DISADV, IDC_RAD_NORMAL + static_cast<int>(request.mode));
+    SetMode(app, request.mode);
     SendMessageW(Control(app, IDC_TARGET), BM_SETCHECK, request.target.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Control(app, IDC_COMPARISON), CB_SETCURSEL, static_cast<int>(request.target.comparison), 0);
     if (request.target.enabled) SetWindowTextW(Control(app, IDC_TARGET_VALUE), std::to_wstring(request.target.value).c_str());
@@ -353,6 +392,7 @@ dice::AppSettings CaptureSettings(App& app) {
     catch (const std::exception&) { /* Keep the last valid destination. */ }
     settings.autoSave = Checked(app, IDC_AUTOSAVE);
     settings.showTimestamp = Checked(app, IDC_TIMESTAMP);
+    settings.quickRollImmediately = Checked(app, IDC_QUICK_IMMEDIATE);
     return settings;
 }
 
@@ -458,15 +498,19 @@ void DeletePreset(App& app) {
 void QuickDie(App& app, int index) {
     if (Busy(app) || index < 0 || index >= 7) return;
     SetWindowTextW(Control(app, IDC_DICE_EDIT), (L"1d" + std::to_wstring(QuickSides[index])).c_str());
+    if (Checked(app, IDC_QUICK_IMMEDIATE)) {
+        StartRoll(app, true);
+        return;
+    }
     SetFocus(Control(app, IDC_DICE_EDIT));
     SendMessageW(Control(app, IDC_DICE_EDIT), EM_SETSEL, 0, -1);
     Status(app, L"Quick die selected. Times and mode are unchanged; select Roll when ready.");
     EnsureFocusVisible(app);
 }
 
-void StartRoll(App& app) {
+void StartRoll(App& app, bool singleRoll) {
     if (Busy(app)) return;
-    auto request = ReadRequest(app);
+    auto request = ReadRequest(app, singleRoll);
     std::optional<std::filesystem::path> path;
     if (Checked(app, IDC_AUTOSAVE)) path = OutputPath(app);
     app.settings = CaptureSettings(app);
@@ -806,7 +850,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_CREATE: Setup(*app); return 0;
         case WM_SIZE:
             if (wParam != SIZE_MINIMIZED && !app->layingOut) {
-                Layout(*app); RememberWindow(*app); EnsureFocusVisible(*app);
+                // Resizing preserves the reading position. Keyboard focus changes
+                // scroll explicitly; an old off-screen edit must not pull us back.
+                Layout(*app); RememberWindow(*app);
             }
             return 0;
         case WM_MOVE: RememberWindow(*app); return 0;

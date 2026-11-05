@@ -8,7 +8,7 @@
 namespace dice {
 namespace {
 constexpr std::array<char, 8> Magic{ 'D', 'R', 'S', 'E', 'T', 'T', 'I', 'N' };
-constexpr std::uint32_t FormatVersion = 3;
+constexpr std::uint32_t FormatVersion = 4;
 constexpr std::size_t MaxFileBytes = 256 * 1024;
 constexpr std::size_t MaxNotation = 1024;
 constexpr std::size_t MaxCsvPath = 32760;
@@ -177,6 +177,8 @@ std::string Serialize(const AppSettings& settings) {
     }
     // Version 3 separates the remembered threshold from its enabled state.
     U32(bytes, settings.poolEnabled ? 1 : 0);
+    // Version 4 makes immediate rolling from quick dice an opt-in preference.
+    U32(bytes, settings.quickRollImmediately ? 1 : 0);
     if (bytes.size() > MaxFileBytes) throw std::length_error("Settings exceed the supported file size.");
     return bytes;
 }
@@ -223,6 +225,7 @@ AppSettings Deserialize(const std::string& bytes) {
         result.poolEnabled = result.successThreshold > 0;
         if (!result.poolEnabled) result.successThreshold = 8;
     }
+    if (version >= 4) result.quickRollImmediately = input.Boolean();
     input.End();
     ValidateSettings(result);
     return result;

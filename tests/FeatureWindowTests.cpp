@@ -277,6 +277,40 @@ void CheckSmallDpi(ui::Panel& panel) {
         FeatureCheck(!IsWindowVisible(panel.window), "DPI and keyboard checks must never show test windows.");
     }
 }
+void CheckResizeStability(ui::Panel& panel) {
+    const auto resize=[&](int width) {
+        SetWindowPos(panel.window,nullptr,0,0,ui::Scale(panel,width),ui::Scale(panel,560),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    };
+    resize(900);
+    SetFocus(ui::Child(panel,panel.probability?ui::FormulaA:ui::FilterName));
+    ui::ScrollPanel(panel,SB_VERT,SB_BOTTOM);
+    const auto position=panel.scrollY;
+    FeatureCheck(position>0,"Resize test must begin while reading below the focused edit field.");
+    for(int width:{901,920,980,940,900}) {
+        resize(width);
+        FeatureCheck(panel.scrollY==position,
+            "Resizing must preserve the reading position instead of scrolling back to an unchanged input focus.");
+    }
+    // Real keyboard navigation still reveals its destination after a resize.
+    ui::EnsurePanelFocus(panel);
+    RECT focus{},body{};GetWindowRect(GetFocus(),&focus);
+    MapWindowPoints(nullptr,panel.body,reinterpret_cast<POINT*>(&focus),2);GetClientRect(panel.body,&body);
+    FeatureCheck(focus.top>=0 && focus.bottom<=body.bottom,
+        "Revealing actual keyboard focus must still work after preserving a resize scroll position.");
+    SetFocus(ui::Child(panel,ui::Close));
+    for(int width:{318,319,320,321,322,620,621,622,900,320,900}) {
+        resize(width);
+        RECT viewport{};GetClientRect(panel.body,&viewport);
+        const auto scrollX=panel.scrollX,scrollY=panel.scrollY,contentWidth=panel.contentWidth,contentHeight=panel.contentHeight;
+        ui::LayoutPanel(panel);
+        FeatureCheck(panel.scrollX==scrollX && panel.scrollY==scrollY && panel.contentWidth==contentWidth && panel.contentHeight==contentHeight,
+            "A resize crossing scrollbar and wrapping thresholds must settle without needing another layout pass.");
+        SCROLLINFO info{sizeof(info),SIF_ALL};GetScrollInfo(panel.body,SB_VERT,&info);
+        FeatureCheck(info.nPos==panel.scrollY && info.nPage==static_cast<UINT>(viewport.bottom),
+            "Scroll range must match the final viewport throughout a continuous resize.");
+    }
+    FeatureCheck(!IsWindowVisible(panel.window),"Resize regressions must leave the test window hidden.");
+}
 }
 
 void FeatureWindowTests() {
@@ -349,6 +383,7 @@ void FeatureWindowTests() {
         FeatureCheck(!IsWindowEnabled(ui::Child(panel, ui::Reuse)) && IsWindowEnabled(ui::Child(panel, ui::Export)),
             "Multiple selection permits export but must not silently choose parameters to reuse.");
         CheckChart(panel);
+        CheckResizeStability(panel);
         FeatureCheck(ui::GetText(ui::Child(panel,ui::Frequencies)).find(L"9\t1\t50.000000")!=std::wstring::npos,
             "The copyable frequency table must expose exact value counts and percentages.");
         CheckSmallDpi(panel);
@@ -387,6 +422,7 @@ void FeatureWindowTests() {
         FeatureCheck(GetFocus()==ui::Child(panel,ui::Calculate) && text.find(L"d20 [Normal]")!=std::wstring::npos,
             "Completed output must identify the calculated request and restore focus to Calculate.");
         CheckChart(panel);
+        CheckResizeStability(panel);
         CheckSmallDpi(panel);
         SetWindowTextW(ui::Child(panel,ui::FormulaA),L"d6");
         FeatureCheck(panel.stale && panel.distributionA.empty() && ui::GetText(ui::Child(panel,ui::Frequencies)).empty() &&

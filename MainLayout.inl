@@ -51,7 +51,9 @@ void Layout(App& app) {
         put(IDC_STATUS, margin, footerY, footerWidth, statusHeight);
 
         int y = margin;
-        const int label = (std::max)(Px(app, 62), textWidth(IDC_FILE_LABEL, 4));
+        int label = Px(app, 62);
+        for (int id : {IDC_PRESET_LABEL, IDC_GROUP_LABEL, IDC_QUICK_LABEL, IDC_DICE_LABEL, IDC_NAME_LABEL, IDC_FILE_LABEL})
+            label = (std::max)(label, textWidth(id, 4));
         const int apply = textWidth(IDC_PRESET_APPLY, 24), save = textWidth(IDC_PRESET_SAVE, 24), remove = textWidth(IDC_PRESET_DELETE, 24);
         const bool presetWide = width >= label + Px(app, 160) + apply + save + remove + 4 * gap;
         put(IDC_PRESET_LABEL, margin, y + (row - line) / 2, label, line);
@@ -83,6 +85,8 @@ void Layout(App& app) {
             if (x + w > margin + width) { x = margin; y += row + gap; }
             put(id, x, y, w, row); x += w + gap;
         }
+        y += row + gap;
+        put(IDC_QUICK_IMMEDIATE, margin, y, width, row);
         y += row + gap;
         put(IDC_DICE_LABEL, margin, y + (row - line) / 2, label, line);
         const int timesLabel = textWidth(IDC_TIMES_LABEL, 4), timesEdit = Px(app, 90);
@@ -157,7 +161,9 @@ void Layout(App& app) {
         RECT next{}; GetClientRect(app.window, &next);
         if (EqualRect(&area, &next)) break;
     }
-    const RECT viewport{0, 0, area.right, app.bodyHeight};
+    // A real parent viewport clips every child's client and nonclient painting
+    // at one shared boundary above the fixed actions.
+    MoveWindow(app.body, 0, 0, area.right, app.bodyHeight, FALSE);
     for (const auto& placement : placements) {
         const bool footer = IsFooterControl(placement.id);
         const auto child = Control(app, placement.id);
@@ -169,16 +175,17 @@ void Layout(App& app) {
             ui::ClipChildToViewport(child, app.window, footerViewport);
         }
         else if (footer) SetWindowRgn(child, nullptr, FALSE);
-        else ui::ClipChildToViewport(child, app.window, viewport);
     }
-    RedrawWindow(app.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    ui::RedrawLayout(app.window);
 }
 
 void EnsureFocusVisible(App& app) {
     auto focus = GetFocus();
     if (!focus || !IsChild(app.window, focus)) return;
     // Editable comboboxes contain an edit child; scroll the complete combobox.
-    while (GetParent(focus) != app.window && IsChild(app.window, GetParent(focus))) focus = GetParent(focus);
+    while (GetParent(focus) != app.window && GetParent(focus) != app.body &&
+        IsChild(app.window, GetParent(focus))) focus = GetParent(focus);
+    if (focus == app.body) return;
     const bool footer = IsFooterControl(GetDlgCtrlID(focus));
     RECT bounds{}, client{};
     GetWindowRect(focus, &bounds);

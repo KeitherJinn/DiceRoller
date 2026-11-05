@@ -192,7 +192,7 @@ void LayoutPanel(Panel& panel) {
         RECT after{};GetClientRect(panel.body,&after);
         if(pass && oldX==panel.scrollX && oldY==panel.scrollY && after.right==viewport.right && after.bottom==viewport.bottom)break;
     }
-    panel.layingOut=false;RedrawWindow(panel.window,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);
+    ui::RedrawLayout(panel.window);panel.layingOut=false;
 }
 void EnsurePanelFocus(Panel& panel) {
     auto focus=GetFocus();if(!focus || !IsChild(panel.body,focus))return;
@@ -577,9 +577,10 @@ void SetupPanel(Panel& panel) {
     WNDCLASSEXW bodyClass{sizeof(bodyClass)};bodyClass.hInstance=GetModuleHandleW(nullptr);bodyClass.lpfnWndProc=BodyProc;
     bodyClass.lpszClassName=L"DiceRollerFeatureBody";bodyClass.hbrBackground=GetSysColorBrush(COLOR_BTNFACE);
     if(!RegisterClassExW(&bodyClass) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)throw std::runtime_error("Could not register feature body.");
-    SetWindowLongPtrW(panel.window,GWL_STYLE,GetWindowLongPtrW(panel.window,GWL_STYLE)&~(WS_VSCROLL|WS_HSCROLL));
+    // Background erasure during live resizing must not paint over child controls.
+    SetWindowLongPtrW(panel.window,GWL_STYLE,(GetWindowLongPtrW(panel.window,GWL_STYLE)&~(WS_VSCROLL|WS_HSCROLL))|WS_CLIPCHILDREN);
     SetWindowPos(panel.window,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
-    panel.body=CreateWindowExW(WS_EX_CONTROLPARENT,bodyClass.lpszClassName,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL,
+    panel.body=CreateWindowExW(WS_EX_CONTROLPARENT,bodyClass.lpszClassName,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|WS_CLIPCHILDREN,
         0,0,1,1,panel.window,reinterpret_cast<HMENU>(Body),bodyClass.hInstance,&panel);
     if(!panel.body)throw std::runtime_error("Could not create feature body.");
     panel.refreshing=true;
@@ -659,7 +660,11 @@ LRESULT CALLBACK PanelProc(HWND window,UINT message,WPARAM wp,LPARAM lp) {
             limits->ptMinTrackSize={(std::min)(minimum.right-minimum.left,work.right-work.left),(std::min)(minimum.bottom-minimum.top,work.bottom-work.top)};
             return 0;
         }
-        case WM_SIZE: LayoutPanel(*panel);EnsurePanelFocus(*panel);return 0;
+        case WM_SIZE:
+            // A resize does not change keyboard focus. Preserve the user's reading
+            // position; actual focus navigation and DPI changes reveal controls.
+            if(wp!=SIZE_MINIMIZED)LayoutPanel(*panel);
+            return 0;
         case WM_DPICHANGED: {
             const UINT oldDpi=panel->dpi;
             panel->dpi=HIWORD(wp); Font(*panel);

@@ -14,6 +14,7 @@ using namespace dice;
 void UiRegressionTests(const std::filesystem::path& base);
 void SettingsRegressionTests(const std::filesystem::path& base);
 void UiFeatureTests(const std::filesystem::path& base);
+void UiQuickRollTests(const std::filesystem::path& base);
 void UiCloseTests(const std::filesystem::path& base);
 void UiViewportTests(const std::filesystem::path& base);
 void AnalysisTests();
@@ -350,6 +351,9 @@ int main(int argc, char** argv) {
     test("quick dice, presets, settings memory and browse recovery", [] {
         TempDirectory temp;
         UiFeatureTests(temp.root);
+    });
+    test("quick-die immediate single roll, current rules, busy clicks and preference memory", [] {
+        TempDirectory temp; UiQuickRollTests(temp.root);
     });
     test("closing while confirmation pumps completed work", [] {
         TempDirectory temp;

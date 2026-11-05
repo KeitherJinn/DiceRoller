@@ -101,7 +101,10 @@ parameters; frequency tables provide copyable values in addition to the labelled
 ## Quick dice, presets, groups and settings
 
 - Quick buttons offer d4, d6, d8, d10, d12, d20 and d100. They select a one-die expression, retain Times/Mode/target/pool
-  options, and wait for **Roll**.
+  options, and wait for **Roll** by default. Enable **Roll once on quick-die click** below the quick buttons to generate
+  one roll immediately with the selected die. This uses the current name, mode, target/pool and automatic CSV settings;
+  it ignores the batch **Times** field without changing its value. The switch is remembered on normal exit and defaults
+  to off for new/older settings. Quick buttons and the switch are disabled while an operation runs.
 - Enter a **Preset** name, configure the expression/times/mode/target/pool options, optionally enter a **Group**, and
   select **Save preset**. There are at most 50 presets. Names/groups allow 64 UTF-16 code units each; formulas allow
   1,024. Names are globally unique ignoring case/surrounding spaces; groups do not create separate name scopes.
@@ -118,8 +121,8 @@ parameters; frequency tables provide copyable values in addition to the labelled
 - Disabled Target/Pool controls retain their valid entered thresholds across restarts. Enabling a rule and remembering
   its threshold are separate settings. Saving a preset validates its own name, independently of the roll-name field;
   one-roll probability analysis does not validate the unrelated batch name or Times.
-- Preferences/presets live in `%LOCALAPPDATA%\DiceRoller\settings.bin`. Settings version 3 reads version 1/2 files,
-  supplying defaults for older fields and migrating pool enablement; the next successful save writes version 3. The recognized old
+- Preferences/presets live in `%LOCALAPPDATA%\DiceRoller\settings.bin`. Settings version 4 reads version 1/2/3 files,
+  supplying defaults for older fields and migrating pool enablement; the next successful save writes version 4. The recognized old
   default `dice_results_v2.csv` destination switches to the v3 filename without modifying the old CSV.
 - Missing settings use defaults. Damaged/unreadable/unsupported settings show a warning and use defaults. Before
   replacing such a file, its original bytes are preserved in a uniquely named sibling backup; failed backup prevents
@@ -208,6 +211,8 @@ for another attempt. Batch exports read one record at a time and check cancellat
   horizontal fallback only below that width. Scrollbars, mouse wheel and keyboard focus keep content reachable.
   The main status area shows up to three lines and scrolls longer messages. Below the minimum content width,
   main actions stay fixed vertically and move with horizontal scrolling so keyboard focus can reveal each action.
+- Resizing preserves the current scroll position within the new scroll range. The main form uses a separate child
+  viewport to clip controls above its footer, and completed layouts redraw child frames as well as their contents.
 - Tab/Shift+Tab navigate; arrows select roll mode; Enter invokes the current default action. Alt+X exports pending batches. F1 opens About;
   File > Exit closes the application. Buttons/labels expose their underlined access keys.
 - **Copy log** copies only the retained recent display. **Clear log** leaves History, pending exports and CSV files intact.
@@ -222,7 +227,7 @@ for another attempt. Batch exports read one record at a time and check cancellat
 - `AppSettings.h/.cpp`: validated preferences/presets, v1/v2 migration, backups and atomic replacement.
 - `PresetExchange.h/.cpp`: `.drpresets` exchange and group/rule-aware duplicate previews/merge strategies.
 - `FeatureWindows.h/.cpp`: history/details/statistics, distribution chart, probability comparison and import preview UI.
-- `WindowLayout.h/.cpp`: screen-coordinate placement and DPI-aware minimum sizes bounded by the work area.
+- `WindowLayout.h/.cpp`: screen-coordinate placement, DPI-aware minimum sizes, viewport clipping and layout redraw.
 - `MainLayout.inl`: responsive main form, measured text, fixed actions and scrolling/focus visibility.
 - `SingleInstance.h/.cpp`: per-user ownership and activation of the existing window.
 - `main.cpp`: primary controls, independent rule/roll inputs, metadata/dirty-state integration and asynchronous shutdown.

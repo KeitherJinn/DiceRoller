@@ -12,4 +12,6 @@ SIZE ControlTextSize(HWND control);
 int WrappedTextHeight(HWND control, int width);
 // Child coordinates remain unchanged; only the part inside viewport can paint or receive clicks.
 void ClipChildToViewport(HWND child, HWND parent, const RECT& viewport);
+// Finish a deferred layout before returning, including child borders and scrollbars.
+void RedrawLayout(HWND window);
 }
